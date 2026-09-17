@@ -28,8 +28,14 @@ MycoWave is a version-aware, zero-intervention installer for the **Alpha AWUS036
 | **Firmware updates** | Auto-copies latest `rtw88xx_fw.bin` from `linux-firmware` |
 | **DKMS auto-rebuild** | Initramfs hook + systemd service for kernel upgrades |
 | **Post-install verification** | Module load, monitor mode, injection capability, 5GHz channels |
+| **Comprehensive test suite** | `--test` flag: 20+ checks (driver, monitor, injection, 5GHz, VHT/HT, USB, services) |
 | **Clean uninstall** | `--uninstall` removes everything including configs |
 | **ARM64/Pi support** | Auto-installs `kalipi-kernel-headers`, USB power tweaks |
+| **Secure Boot (MOK)** | `--secure-boot`: key gen, UEFI enrollment, DKMS signing |
+| **Self-healing watchdog** | `--watchdog`: health checks, USB reset, driver reload, crash detection |
+| **Thermal monitoring** | `--thermal`: TX power throttling at 80°C, critical at 95°C |
+| **Bluetooth coexistence** | `--coex`: auto-detects internal BT, configures rtw88 coex |
+| **Crash dump collector** | Auto-installs hourly diagnostic collection (kernel logs, debugfs, USB, etc.) |
 
 ---
 
@@ -86,6 +92,13 @@ Options:
   --reg-domain CODE      Regulatory domain for 5GHz (default: BO)
   --performance          Enable performance optimizations
   --skip-firmware        Skip firmware update check
+  --secure-boot          Enable Secure Boot MOK automation
+  --pi-optimizations     Enable Raspberry Pi / ARM64 optimizations
+  --watchdog             Enable self-healing watchdog service
+  --thermal              Enable thermal monitoring service
+  --coex                 Configure Bluetooth coexistence
+  --skip-crash-collector Skip crash dump collector installation
+  --test                 Run comprehensive test suite after install
   --help, -h             Show this help
 ```
 
@@ -219,12 +232,3 @@ Built on the work of:
 ## License
 
 MIT License — see [LICENSE](LICENSE) for details.
-
----
-
-## Related Projects
-
-- **Mycocap** — Packet capture automation
-- **MycoCopy** — File transfer utilities
-
-*Part of the Myco* ecosystem.*

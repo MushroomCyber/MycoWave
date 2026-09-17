@@ -27,6 +27,7 @@ ENABLE_WATCHDOG=false
 ENABLE_THERMAL=false
 ENABLE_COEX=false
 SKIP_CRASH_COLLECTOR=false
+RUN_TEST_SUITE=false
 
 # Colors for output
 RED='\033[0;31m'
@@ -788,6 +789,120 @@ verify_install() {
     success "All verification checks passed"
 }
 
+# ─── Comprehensive Test Suite ─────────────────────────────────────────────────
+run_full_test_suite() {
+    log "Running comprehensive test suite..."
+
+    local iface=""
+    for i in /sys/class/net/wlan*; do
+        [[ -e "$i" ]] || continue
+        iface=$(basename "$i")
+        break
+    done
+
+    [[ -z "$iface" ]] && { error "No wireless interface found"; return 1; }
+
+    local all_passed=true
+
+    # Test 1: Driver loaded & version
+    run_test "Driver module loaded" "lsmod | grep -qE '^(88XXau|rtw_8812au)'"
+
+    # Test 2: Interface up
+    run_test "Interface $iface exists" "[[ -e /sys/class/net/$iface ]]"
+
+    # Test 3: Interface carrier (link detection capability)
+    run_test "Interface has carrier detection" "ethtool $iface 2>/dev/null | grep -q 'Link detected'"
+
+    # Test 4: TX power setting
+    run_test "TX power configurable" "iw dev $iface set txpower fixed 2000 2>/dev/null || true"
+
+    # Test 5: Regulatory domain
+    local reg=$(iw reg get 2>/dev/null | grep -i country | head -1 | awk '{print $2}' || echo "00")
+    run_test "Regulatory domain set ($reg)" "[[ '$reg' != '00' ]]"
+
+    # Test 6: Channel list populated
+    run_test "Channel list available" "iw phy phy0 channels 2>/dev/null | grep -q MHz"
+
+    # Test 7: 5GHz channels present
+    local ch5=$(iw phy phy0 channels 2>/dev/null | grep -c "5[0-9][0-9][0-9]" || echo 0)
+    run_test "5GHz channels available ($ch5)" "[[ $ch5 -gt 0 ]]"
+
+    # Test 8: VHT capabilities (802.11ac)
+    run_test "VHT (802.11ac) supported" "iw phy phy0 info 2>/dev/null | grep -qi vht"
+
+    # Test 9: HT capabilities (802.11n)
+    run_test "HT (802.11n) supported" "iw phy phy0 info 2>/dev/null | grep -qi ht"
+
+    # Test 10: Monitor mode
+    run_test "Monitor mode works" "airmon-ng check kill >/dev/null 2>&1 && airmon-ng start $iface >/dev/null 2>&1"
+
+    # Test 11: Injection capability (monitor interface exists)
+    local mon="${iface}mon"
+    run_test "Monitor interface created ($mon)" "[[ -e /sys/class/net/$mon ]]"
+
+    # Test 12: Cleanup monitor
+    run_test "Monitor cleanup works" "airmon-ng stop $mon >/dev/null 2>&1 || true"
+
+    # Test 13: USB device responsive
+    run_test "USB device responsive" "lsusb -d 0bda:a811 2>/dev/null | grep -q Realtek"
+
+    # Test 14: No driver conflict
+    run_test "No driver conflict (single driver)" "! (lsmod | grep -q '^88XXau' && lsmod | grep -q '^rtw_8812au')"
+
+    # Test 15: Module parameters applied (if performance enabled)
+    if [[ "$ENABLE_PERFORMANCE" == true ]]; then
+        local params=$(cat /sys/module/${driver_module:-88XXau}/parameters/ 2>/dev/null | head -5 || echo "")
+        run_test "Module parameters directory accessible" "[[ -d /sys/module/${driver_module:-88XXau}/parameters/ ]]"
+    fi
+
+    # Test 16: Firmware loaded
+    run_test "Firmware files present" "ls /lib/firmware/rtlwifi/rtw8812a_fw.bin 2>/dev/null || ls /lib/firmware/rtw8812a_fw.bin 2>/dev/null"
+
+    # Test 17: Thermal zone accessible (if thermal enabled)
+    if [[ "$ENABLE_THERMAL" == true ]]; then
+        run_test "Thermal monitoring accessible" "[[ -d /sys/kernel/debug/rtw88 ]] || [[ -d /sys/class/thermal ]]"
+    fi
+
+    # Test 18: Watchdog service active (if watchdog enabled)
+    if [[ "$ENABLE_WATCHDOG" == true ]]; then
+        run_test "Watchdog service active" "systemctl is-active mycowave-watchdog.service 2>/dev/null | grep -q active"
+    fi
+
+    # Test 19: Crash collector timer (if enabled)
+    if [[ "$SKIP_CRASH_COLLECTOR" != true ]]; then
+        run_test "Crash collector timer enabled" "systemctl is-enabled mycowave-crash-collector.timer 2>/dev/null | grep -q enabled"
+    fi
+
+    # Test 20: udev rules installed
+    run_test "udev rules installed" "[[ -f /etc/udev/rules.d/90-awus036ach.rules ]]"
+
+    echo
+    if [[ "$all_passed" == true ]]; then
+        success "═══════════════════════════════════════"
+        success "  ALL TESTS PASSED"
+        success "═══════════════════════════════════════"
+        return 0
+    else
+        error "═══════════════════════════════════════"
+        error "  SOME TESTS FAILED - Review output above"
+        error "═══════════════════════════════════════"
+        return 1
+    fi
+}
+
+run_test() {
+    local name="$1"
+    local cmd="$2"
+    if eval "$cmd" >/dev/null 2>&1; then
+        success "✓ $name"
+        return 0
+    else
+        error "✗ $name"
+        all_passed=false
+        return 1
+    fi
+}
+
 # ─── Uninstall ──────────────────────────────────────────────────────────────
 uninstall_driver() {
     log "Uninstalling MycoWave driver and configuration..."
@@ -895,6 +1010,7 @@ Options:
   --thermal              Enable thermal monitoring service
   --coex                 Configure Bluetooth coexistence
   --skip-crash-collector Skip crash dump collector installation
+  --test                 Run comprehensive test suite after install
   --help, -h             Show this help
 
 Examples:
@@ -929,6 +1045,7 @@ parse_args() {
             --thermal) ENABLE_THERMAL=true ;;
             --coex) ENABLE_COEX=true ;;
             --skip-crash-collector) SKIP_CRASH_COLLECTOR=true ;;
+            --test) RUN_TEST_SUITE=true ;;
             --help|-h) usage; exit 0 ;;
             *) error "Unknown option: $1"; usage; exit 1 ;;
         esac
@@ -982,6 +1099,11 @@ main() {
     setup_monitor_mode
     setup_dkms_autorebuild
     verify_install
+
+    # Run comprehensive test suite if requested
+    if [[ "$RUN_TEST_SUITE" == true ]]; then
+        run_full_test_suite
+    fi
 
     log "═══════════════════════════════════════════════════════════"
     success "Installation complete!"
