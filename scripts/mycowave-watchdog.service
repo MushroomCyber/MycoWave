@@ -1,0 +1,25 @@
+[Unit]
+Description=MycoWave WiFi Driver Watchdog
+Documentation=https://github.com/MushroomCyber/MycoWave
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/wifi-watchdog.sh run
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mycowave-watchdog
+
+# Security hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/sys/class/net /sys/bus/usb/devices /sys/kernel/debug
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_DAC_OVERRIDE
+
+[Install]
+WantedBy=multi-user.target

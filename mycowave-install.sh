@@ -9,7 +9,7 @@
 set -euo pipefail
 
 # ─── Configuration ──────────────────────────────────────────────────────────
-SCRIPT_VERSION="2.1.0"
+SCRIPT_VERSION="2.2.0"
 SCRIPT_NAME="mycowave-install"
 LOG_FILE="/var/log/${SCRIPT_NAME}.log"
 DRY_RUN=false
@@ -21,6 +21,12 @@ SKIP_MONITOR_SETUP=false
 REG_DOMAIN="BO"  # Bolivia - permissive for 5GHz channels
 ENABLE_PERFORMANCE=false
 SKIP_FIRMWARE_UPDATE=false
+ENABLE_SECURE_BOOT=false
+ENABLE_PI_OPTIMIZATIONS=false
+ENABLE_WATCHDOG=false
+ENABLE_THERMAL=false
+ENABLE_COEX=false
+SKIP_CRASH_COLLECTOR=false
 
 # Colors for output
 RED='\033[0;31m'
@@ -367,6 +373,280 @@ update_firmware() {
     fi
 }
 
+# ─── Secure Boot Setup ────────────────────────────────────────────────────────
+setup_secure_boot() {
+    [[ "$ENABLE_SECURE_BOOT" != true ]] && { info "Secure Boot automation disabled (use --secure-boot)"; return; }
+
+    log "Setting up Secure Boot MOK automation..."
+
+    # Check if mokutil is available
+    if ! command -v mokutil >/dev/null 2>&1; then
+        warn "mokutil not installed, installing..."
+        run "apt-get update -qq && apt-get install -y mokutil"
+    fi
+
+    # Check Secure Boot state
+    local sb_state=$(mokutil --sb-state 2>/dev/null || echo "unknown")
+    if echo "$sb_state" | grep -qi "enabled"; then
+        info "Secure Boot is ENABLED - MOK enrollment required"
+    else
+        warn "Secure Boot is DISABLED - MOK enrollment not strictly required"
+    fi
+
+    # Install enroll-mok script
+    local script_src="$(dirname "${BASH_SOURCE[0]}")/scripts/enroll-mok.sh"
+    local script_dst="/usr/local/bin/mycowave-enroll-mok"
+
+    if [[ -f "$script_src" ]]; then
+        run "cp '$script_src' '$script_dst'"
+        run "chmod +x '$script_dst'"
+        success "Installed MOK enrollment script to $script_dst"
+    else
+        warn "enroll-mok.sh not found at $script_src"
+    fi
+
+    # Generate MOK key if missing
+    local mok_dir="/var/lib/shim-signed/mok"
+    local mok_key="$mok_dir/MOK.priv"
+    local mok_cert="$mok_dir/MOK.der"
+
+    run "mkdir -p '$mok_dir'"
+    run "chmod 700 '$mok_dir'"
+
+    if [[ ! -f "$mok_key" ]]; then
+        log "Generating MOK key pair..."
+        run "openssl req -new -x509 -newkey rsa:2048 -keyout '$mok_key' -outform DER -out '$mok_cert' -nodes -days 36500 -subj '/CN=MycoWave DKMS Module Signing/'"
+        run "chmod 600 '$mok_key'"
+        run "chmod 644 '$mok_cert'"
+        success "MOK key generated"
+    else
+        info "MOK key already exists"
+    fi
+
+    info "To enroll MOK in UEFI, run: sudo $script_dst enroll"
+    info "Then REBOOT and complete enrollment in the blue MOK Manager screen"
+}
+
+# ─── Pi/ARM64 Optimizations Setup ────────────────────────────────────────────
+setup_pi_optimizations() {
+    [[ "$ENABLE_PI_OPTIMIZATIONS" != true ]] && { info "Pi optimizations disabled (use --pi-optimizations)"; return; }
+
+    log "Setting up Raspberry Pi / ARM64 optimizations..."
+
+    # Install apply-pi-optimizations script
+    local script_src="$(dirname "${BASH_SOURCE[0]}")/scripts/apply-pi-optimizations.sh"
+    local script_dst="/usr/local/bin/mycowave-pi-optimizations"
+
+    if [[ -f "$script_src" ]]; then
+        run "cp '$script_src' '$script_dst'"
+        run "chmod +x '$script_dst'"
+        success "Installed Pi optimizations script to $script_dst"
+    else
+        warn "apply-pi-optimizations.sh not found at $script_src"
+    fi
+
+    # Run it if on Pi
+    if [[ -f /proc/device-tree/model ]] && grep -qi "raspberry pi" /proc/device-tree/model 2>/dev/null; then
+        log "Raspberry Pi detected - applying optimizations..."
+        run "'$script_dst'" || warn "Pi optimizations script returned non-zero"
+    else
+        info "Not on Raspberry Pi - script installed for manual use"
+        info "Run: sudo $script_dst"
+    fi
+}
+
+# ─── Watchdog Setup ───────────────────────────────────────────────────────────
+setup_watchdog() {
+    [[ "$ENABLE_WATCHDOG" != true ]] && { info "Watchdog disabled (use --watchdog)"; return; }
+
+    log "Setting up self-healing watchdog..."
+
+    # Install watchdog script
+    local script_src="$(dirname "${BASH_SOURCE[0]}")/scripts/wifi-watchdog.sh"
+    local script_dst="/usr/local/bin/wifi-watchdog"
+
+    if [[ -f "$script_src" ]]; then
+        run "cp '$script_src' '$script_dst'"
+        run "chmod +x '$script_dst'"
+        success "Installed watchdog script to $script_dst"
+    else
+        warn "wifi-watchdog.sh not found at $script_src"
+    fi
+
+    # Install systemd service
+    local svc_src="$(dirname "${BASH_SOURCE[0]}")/scripts/mycowave-watchdog.service"
+    local svc_dst="/etc/systemd/system/mycowave-watchdog.service"
+
+    if [[ -f "$svc_src" ]]; then
+        run "cp '$svc_src' '$svc_dst'"
+        success "Installed watchdog systemd service"
+    else
+        warn "mycowave-watchdog.service not found at $svc_src"
+    fi
+
+    # Install NetworkManager dispatcher
+    local nm_src="$(dirname "${BASH_SOURCE[0]}")/scripts/99-mycowave-wifi-recover"
+    local nm_dst="/etc/NetworkManager/dispatcher.d/99-mycowave-wifi-recover"
+
+    if [[ -f "$nm_src" ]]; then
+        run "cp '$nm_src' '$nm_dst'"
+        run "chmod +x '$nm_dst'"
+        success "Installed NetworkManager dispatcher for crash detection"
+    else
+        warn "99-mycowave-wifi-recover not found at $nm_src"
+    fi
+
+    # Enable and start
+    run "systemctl daemon-reload"
+    run "systemctl enable mycowave-watchdog.service"
+    run "systemctl start mycowave-watchdog.service"
+
+    success "Watchdog service installed and started"
+}
+
+# ─── Thermal Monitor Setup ────────────────────────────────────────────────────
+setup_thermal() {
+    [[ "$ENABLE_THERMAL" != true ]] && { info "Thermal monitoring disabled (use --thermal)"; return; }
+
+    log "Setting up thermal monitoring..."
+
+    # Install thermal monitor script
+    local script_src="$(dirname "${BASH_SOURCE[0]}")/scripts/thermal-monitor.sh"
+    local script_dst="/usr/local/bin/thermal-monitor"
+
+    if [[ -f "$script_src" ]]; then
+        run "cp '$script_src' '$script_dst'"
+        run "chmod +x '$script_dst'"
+        success "Installed thermal monitor script to $script_dst"
+    else
+        warn "thermal-monitor.sh not found at $script_src"
+    fi
+
+    # Install systemd service (thermal-monitor.sh has install command)
+    run "'$script_dst' install" || warn "Thermal monitor service installation had issues"
+
+    success "Thermal monitoring service installed"
+}
+
+# ─── Bluetooth Coexistence Setup ─────────────────────────────────────────────
+setup_coex() {
+    [[ "$ENABLE_COEX" != true ]] && { info "Bluetooth coexistence config disabled (use --coex)"; return; }
+
+    log "Configuring Bluetooth coexistence..."
+
+    # Detect internal Bluetooth
+    local has_bt=false
+    if command -v hciconfig >/dev/null 2>&1 && hciconfig 2>/dev/null | grep -q "UP RUNNING"; then
+        has_bt=true
+    elif command -v btmgmt >/dev/null 2>&1 && btmgmt info 2>/dev/null | grep -q "powered"; then
+        has_bt=true
+    fi
+
+    # Determine driver
+    local driver_module=""
+    case "$STRATEGY" in
+        inkernel) driver_module="rtw88_core" ;;
+        kali-dkms|ac3rn|aircrack-ng) driver_module="88XXau" ;;
+    esac
+
+    # Create coex config
+    cat > /etc/modprobe.d/mycowave-coex.conf <<EOF
+# MycoWave - Bluetooth Coexistence Configuration
+# Generated on $(date)
+# Internal BT detected: $has_bt
+# Driver: $driver_module
+
+EOF
+
+    if [[ "$STRATEGY" == "inkernel" ]]; then
+        if [[ "$has_bt" == true ]]; then
+            cat >> /etc/modprobe.d/mycowave-coex.conf <<'EOF'
+# Internal Bluetooth detected - enable coexistence
+options rtw88_core rtw_btcoex_enable=1
+# Antenna sharing: 0=dedicated, 1=shared (check EFUSE)
+# options rtw88_core rtw_btcoex_ant_num=0
+EOF
+            info "Internal Bluetooth detected - coexistence ENABLED"
+        else
+            cat >> /etc/modprobe.d/mycowave-coex.conf <<'EOF'
+# No internal Bluetooth - disable coexistence to reduce overhead
+options rtw88_core rtw_btcoex_enable=0
+EOF
+            info "No internal Bluetooth - coexistence DISABLED"
+        fi
+    else
+        cat >> /etc/modprobe.d/mycowave-coex.conf <<'EOF'
+# DKMS driver (88XXau) - coexistence controlled at compile time (CONFIG_RTW_COEX)
+# No runtime module parameters available for coex in DKMS driver
+# If internal BT present, ensure driver was built with CONFIG_RTW_COEX=y
+EOF
+        info "DKMS driver - coexistence is compile-time only"
+    fi
+
+    success "Bluetooth coexistence config written to /etc/modprobe.d/mycowave-coex.conf"
+}
+
+# ─── Crash Collector Setup ────────────────────────────────────────────────────
+setup_crash_collector() {
+    [[ "$SKIP_CRASH_COLLECTOR" == true ]] && { info "Crash collector disabled (default enabled)"; return; }
+
+    log "Setting up crash dump collector..."
+
+    # Install collect-crash script
+    local script_src="$(dirname "${BASH_SOURCE[0]}")/scripts/collect-crash.sh"
+    local script_dst="/usr/local/bin/mycowave-collect-crash"
+
+    if [[ -f "$script_src" ]]; then
+        run "cp '$script_src' '$script_dst'"
+        run "chmod +x '$script_dst'"
+        success "Installed crash collector script to $script_dst"
+    else
+        warn "collect-crash.sh not found at $script_src"
+    fi
+
+    # Create systemd timer for periodic collection (optional)
+    cat > /etc/systemd/system/mycowave-crash-collector.timer <<'EOF'
+[Unit]
+Description=MycoWave Periodic Crash Dump Collection
+Documentation=https://github.com/MushroomCyber/MycoWave
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+    cat > /etc/systemd/system/mycowave-crash-collector.service <<'EOF'
+[Unit]
+Description=MycoWave Crash Dump Collector
+Documentation=https://github.com/MushroomCyber/MycoWave
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/mycowave-collect-crash collect-once
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mycowave-crash
+
+# Security
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/log/mycowave-crashes /sys/class/net /sys/kernel/debug
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH
+EOF
+
+    run "systemctl daemon-reload"
+    run "systemctl enable mycowave-crash-collector.timer"
+    run "systemctl start mycowave-crash-collector.timer"
+
+    success "Crash collector installed with hourly timer"
+}
+
 # ─── Post-Install Configuration ─────────────────────────────────────────────
 setup_monitor_mode() {
     [[ "$SKIP_MONITOR_SETUP" == true ]] && { info "Skipping monitor mode setup"; return; }
@@ -510,26 +790,57 @@ verify_install() {
 
 # ─── Uninstall ──────────────────────────────────────────────────────────────
 uninstall_driver() {
-    log "Uninstalling AWUS036ACH driver and configuration..."
+    log "Uninstalling MycoWave driver and configuration..."
 
-    # Stop services
-    run "systemctl disable awus036ach-monitor.service 2>/dev/null || true"
-    run "systemctl stop awus036ach-monitor.service 2>/dev/null || true"
-    run "rm -f /etc/systemd/system/awus036ach-monitor.service"
+    # Stop and disable services
+    local services=(
+        "awus036ach-monitor.service"
+        "mycowave-watchdog.service"
+        "mycowave-thermal.service"
+        "mycowave-cpu-governor.service"
+        "mycowave-crash-collector.timer"
+        "mycowave-crash-collector.service"
+    )
+
+    for svc in "${services[@]}"; do
+        run "systemctl disable $svc 2>/dev/null || true"
+        run "systemctl stop $svc 2>/dev/null || true"
+        run "rm -f /etc/systemd/system/$svc"
+    done
+
+    run "systemctl daemon-reload"
 
     # Remove udev rules
     run "rm -f /etc/udev/rules.d/90-awus036ach.rules"
+    run "rm -f /etc/udev/rules.d/99-mycowave-usb-pm.rules"
 
-    # Remove NetworkManager dispatcher
+    # Remove NetworkManager dispatchers
     run "rm -f /etc/NetworkManager/dispatcher.d/99-awus036ach-monitor"
+    run "rm -f /etc/NetworkManager/dispatcher.d/99-mycowave-wifi-recover"
 
     # Remove initramfs hook
     run "rm -f /etc/initramfs-tools/scripts/init-top/awus036ach"
     run "update-initramfs -u"
 
-    # Remove modprobe blacklists
+    # Remove modprobe configs
     run "rm -f /etc/modprobe.d/blacklist-rtl88xxau.conf"
     run "rm -f /etc/modprobe.d/blacklist-rtw88.conf"
+    run "rm -f /etc/modprobe.d/awus036ach-performance.conf"
+    run "rm -f /etc/modprobe.d/mycowave-pi.conf"
+    run "rm -f /etc/modprobe.d/mycowave-coex.conf"
+
+    # Remove scripts
+    run "rm -f /usr/local/bin/mycowave-enroll-mok"
+    run "rm -f /usr/local/bin/mycowave-pi-optimizations"
+    run "rm -f /usr/local/bin/wifi-watchdog"
+    run "rm -f /usr/local/bin/thermal-monitor"
+    run "rm -f /usr/local/bin/mycowave-collect-crash"
+
+    # Remove MOK keys
+    run "rm -rf /var/lib/shim-signed/mok"
+
+    # Remove crash dumps
+    run "rm -rf /var/log/mycowave-crashes"
 
     # Unload modules
     run "modprobe -r 88XXau 2>/dev/null || true"
@@ -578,6 +889,12 @@ Options:
   --reg-domain CODE      Regulatory domain for 5GHz (default: BO)
   --performance          Enable performance optimizations (USB2, disable powersave, max TX power)
   --skip-firmware        Skip firmware update check
+  --secure-boot          Enable Secure Boot MOK automation
+  --pi-optimizations     Enable Raspberry Pi / ARM64 optimizations
+  --watchdog             Enable self-healing watchdog service
+  --thermal              Enable thermal monitoring service
+  --coex                 Configure Bluetooth coexistence
+  --skip-crash-collector Skip crash dump collector installation
   --help, -h             Show this help
 
 Examples:
@@ -587,8 +904,10 @@ Examples:
   sudo $0 --uninstall              # Remove everything
   sudo $0 --verbose --reg-domain US
   sudo $0 --performance            # Install with performance optimizations
+  sudo $0 --secure-boot --watchdog --thermal  # Full hardening
+  sudo $0 --pi-optimizations       # Raspberry Pi optimized install
 
-Project: https://github.com/your-org/MycoWave
+Project: https://github.com/MushroomCyber/MycoWave
 EOF
 }
 
@@ -604,6 +923,12 @@ parse_args() {
             --reg-domain) REG_DOMAIN="$2"; shift ;;
             --performance) ENABLE_PERFORMANCE=true ;;
             --skip-firmware) SKIP_FIRMWARE_UPDATE=true ;;
+            --secure-boot) ENABLE_SECURE_BOOT=true ;;
+            --pi-optimizations) ENABLE_PI_OPTIMIZATIONS=true ;;
+            --watchdog) ENABLE_WATCHDOG=true ;;
+            --thermal) ENABLE_THERMAL=true ;;
+            --coex) ENABLE_COEX=true ;;
+            --skip-crash-collector) SKIP_CRASH_COLLECTOR=true ;;
             --help|-h) usage; exit 0 ;;
             *) error "Unknown option: $1"; usage; exit 1 ;;
         esac
@@ -648,6 +973,12 @@ main() {
 
     setup_performance_config
     update_firmware
+    setup_secure_boot
+    setup_pi_optimizations
+    setup_watchdog
+    setup_thermal
+    setup_coex
+    setup_crash_collector
     setup_monitor_mode
     setup_dkms_autorebuild
     verify_install

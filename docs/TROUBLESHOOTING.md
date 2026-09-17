@@ -1,0 +1,283 @@
+# MycoWave - Troubleshooting Guide
+
+## Quick Diagnostics
+
+```bash
+# Run MycoWave verification
+sudo ./mycowave-install.sh --dry-run
+
+# Check driver status
+lsmod | grep -E '88XXau|rtw_8812au|8812au|8821au'
+
+# Check interface
+ip link show wlan0
+
+# Check monitor mode
+sudo airmon-ng check kill
+sudo airmon-ng start wlan0
+```
+
+---
+
+## Common Issues
+
+### 1. "Module won't load — Required key not available"
+
+**Cause**: Secure Boot enabled, DKMS module not signed.
+
+**Solution**:
+```bash
+# Option A: Enroll MOK (recommended)
+sudo /usr/local/bin/mycowave-enroll-mok full
+# Reboot and complete MOK Manager enrollment
+
+# Option B: Disable Secure Boot in BIOS/UEFI
+```
+
+### 2. "DKMS build failed" on kernel 6.15+
+
+**Cause**: Kernel API changes (timer, cfg80211, EXTRA_CFLAGS).
+
+**Solution**:
+```bash
+# Use Ac3rN patched installer
+sudo ./mycowave-install.sh --force-method ac3rn
+
+# Or downgrade kernel
+sudo apt install linux-image-6.13.0-kali-amd64
+```
+
+### 3. "Monitor mode fails / interface not created"
+
+**Cause**: NetworkManager/wpa_supplicant holding interface.
+
+**Solution**:
+```bash
+# Kill interfering processes
+sudo airmon-ng check kill
+
+# Then start monitor mode
+sudo airmon-ng start wlan0
+
+# Verify
+iw dev wlan0mon info | grep monitor
+```
+
+### 4. "No 5GHz channels showing"
+
+**Cause**: Regulatory domain restrictions.
+
+**Solution**:
+```bash
+# Set permissive regulatory domain (Bolivia)
+sudo iw reg set BO
+
+# Verify
+iw reg get
+iw phy phy0 channels | grep 5
+```
+
+### 5. "USB disconnects / adapter disappears"
+
+**Cause**: USB autosuspend, power management, or FIQ FSM (Pi).
+
+**Solution**:
+```bash
+# Check USB power state
+cat /sys/bus/usb/devices/*/power/control
+
+# Disable autosuspend for device
+echo on | sudo tee /sys/bus/usb/devices/<dev>/power/control
+echo -1 | sudo tee /sys/bus/usb/devices/<dev>/power/autosuspend_delay_ms
+
+# On Raspberry Pi - add to /boot/config.txt
+echo "max_usb_current=1" | sudo tee -a /boot/config.txt
+echo "dwc_otg.fiq_fsm_enable=0" | sudo tee -a /boot/config.txt
+```
+
+### 6. "Injection test fails (0%)"
+
+**Cause**: Wrong interface, distance, or driver issue.
+
+**Solution**:
+```bash
+# Use monitor interface, not wlan0
+sudo aireplay-ng -9 wlan0mon
+
+# Move closer to AP
+# Check injection capability
+iw dev wlan0mon info | grep -i monitor
+```
+
+### 7. "arm64/Pi: DKMS build fails — missing headers"
+
+**Cause**: Standard linux-headers don't match Pi kernel.
+
+**Solution**:
+```bash
+sudo apt update && sudo apt install -y kalipi-kernel-headers
+
+# Then rebuild
+sudo dkms autoinstall -k $(uname -r)
+```
+
+### 8. "Driver conflict: both DKMS and in-kernel loaded"
+
+**Cause**: Both 88XXau and rtw_8812au trying to bind device.
+
+**Solution**:
+```bash
+# Check which is loaded
+lsmod | grep -E '88XXau|rtw_8812au'
+
+# Unload unwanted, load desired
+sudo modprobe -r 88XXau
+sudo modprobe rtw_8812au
+
+# Or let MycoWave fix it
+sudo ./mycowave-install.sh  # Re-runs conflict resolution
+```
+
+### 9. "Firmware crash / TX hang in dmesg"
+
+**Cause**: Firmware bug, thermal issue, or USB signal quality.
+
+**Solution**:
+```bash
+# Update firmware
+sudo apt update && sudo apt install -y linux-firmware
+sudo cp /lib/firmware/rtw88* /lib/firmware/rtlwifi/ 2>/dev/null
+
+# Check thermal
+cat /sys/kernel/debug/rtw88/phy*/thermal
+
+# Enable thermal protection (in modprobe.d)
+options 88XXau rtw_tx_pwr_track=1 rtw_thermal_protect=1
+```
+
+### 10. "Low throughput / packet loss"
+
+**Cause**: USB 2.0 bottleneck, interference, or power save.
+
+**Solution**:
+```bash
+# Disable power save
+sudo iw dev wlan0 set power_save off
+
+# Check link quality
+iw dev wlan0 link
+
+# Force USB 2.0 (if on USB3 port causing interference)
+echo 2 | sudo tee /sys/module/88XXau/parameters/rtw_switch_usb_mode
+```
+
+---
+
+## Raspberry Pi Specific
+
+| Issue | Fix |
+|-------|-----|
+| Adapter not detected | `max_usb_current=1` in `/boot/config.txt` |
+| Random disconnects | `dwc_otg.fiq_fsm_enable=0` in `/boot/config.txt` |
+| DKMS build fails | `apt install kalipi-kernel-headers` |
+| High CPU during capture | `echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor` |
+| Voltage warning (⚡) | Use powered USB hub; Pi USB limited to 1.2A total |
+
+---
+
+## Kernel Version Matrix
+
+| Kernel | Working Strategy | Broken Strategy |
+|--------|-----------------|-----------------|
+| 6.18+ | inkernel, ac3rn | kali-dkms, aircrack-ng |
+| 6.15–6.17 | ac3rn, inkernel* | kali-dkms |
+| 6.14 | inkernel, kali-dkms | aircrack-ng |
+| 6.6–6.13 | kali-dkms, aircrack-ng | ac3rn (unnecessary) |
+| < 6.6 | aircrack-ng | kali-dkms (may work) |
+
+*inkernel requires 6.14+
+
+---
+
+## Debug Commands
+
+```bash
+# Full driver info
+modinfo 88XXau
+modinfo rtw_8812au
+
+# Kernel messages (WiFi only)
+dmesg -T | grep -iE "rtw|8812|8821|wlan|firmware"
+
+# Module parameters
+for p in /sys/module/88XXau/parameters/*; do echo "$p: $(cat $p)"; done
+
+# USB device tree
+lsusb -t
+
+# Regulatory domain
+iw reg get
+
+# Channel list
+iw phy phy0 channels
+
+# Monitor mode interfaces
+iw dev
+
+# NetworkManager status
+nmcli device status
+
+# DKMS status
+dkms status
+
+# Secure Boot
+mokutil --sb-state
+mokutil --list-enrolled
+```
+
+---
+
+## Log Files
+
+| Log | Location |
+|-----|----------|
+| MycoWave install | `/var/log/mycowave-install.log` |
+| Watchdog | `journalctl -u mycowave-watchdog -f` |
+| Thermal | `journalctl -u mycowave-thermal -f` |
+| Crash dumps | `/var/log/mycowave-crashes/` |
+| Kernel | `dmesg -T` / `journalctl -k` |
+
+---
+
+## Getting Help
+
+1. **Run verification**: `sudo ./mycowave-install.sh --dry-run`
+2. **Collect crash dump**: `sudo /usr/local/bin/mycowave-collect-crash`
+3. **Check GitHub Issues**: https://github.com/MushroomCyber/MycoWave/issues
+4. **Include in bug report**:
+   - `uname -r`
+   - `lsmod | grep -E '88XX|rtw'`
+   - `dmesg -T | grep -iE 'rtw|8812|8821|wlan' | tail -50`
+   - Output of `sudo ./mycowave-install.sh --dry-run`
+
+---
+
+## Recovery Commands
+
+```bash
+# Complete reset
+sudo ./mycowave-install.sh --uninstall
+sudo reboot
+sudo ./mycowave-install.sh --performance --secure-boot --watchdog --thermal
+
+# Force specific strategy
+sudo ./mycowave-install.sh --force-method ac3rn
+
+# Re-sign modules after kernel update
+sudo /usr/local/bin/mycowave-enroll-mok sign
+
+# Manual monitor mode
+sudo airmon-ng check kill
+sudo airmon-ng start wlan0
+sudo airodump-ng wlan0mon
+```

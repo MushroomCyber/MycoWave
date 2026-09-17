@@ -1,0 +1,69 @@
+#!/bin/bash
+# =============================================================================
+# MycoWave - NetworkManager Dispatcher for WiFi Auto-Recovery
+# Triggers watchdog recovery on interface down if driver crash detected
+# =============================================================================
+
+# This script is called by NetworkManager for each interface state change
+# $1 = interface name (e.g., wlan0)
+# $2 = action (up, down, pre-up, post-down, etc.)
+
+IFACE="$1"
+ACTION="$2"
+
+# Only act on our target interface
+TARGET_IFACE="${MYCOWAVE_INTERFACE:-wlan0}"
+if [[ "$IFACE" != "$TARGET_IFACE" ]]; then
+    exit 0
+fi
+
+LOG_TAG="mycowave-nm-recover"
+
+log() {
+    logger -t "$LOG_TAG" "$*"
+}
+
+# On interface down, check for driver crash
+if [[ "$ACTION" == "down" ]]; then
+    log "Interface $IFACE went down - checking for driver crash..."
+
+    # Check recent dmesg for driver crash signatures (last 30 seconds)
+    crash_patterns=(
+        "firmware.*crash"
+        "firmware.*stop"
+        "fw.*coredump"
+        "TX hang"
+        "tx hang"
+        "rtw.*firmware.*fail"
+        "rtw.*recovery"
+        "8812au.*firmware"
+        "88XXau.*firmware"
+    )
+
+    crash_detected=false
+    for pattern in "${crash_patterns[@]}"; do
+        if dmesg -T --since "30 seconds ago" 2>/dev/null | grep -qi "$pattern"; then
+            crash_detected=true
+            log "Driver crash pattern detected: $pattern"
+            break
+        fi
+    done
+
+    if [[ "$crash_detected" == true ]]; then
+        log "Scheduling watchdog recovery..."
+        # Trigger the watchdog service to run recovery
+        systemctl restart mycowave-watchdog.service 2>/dev/null || true
+    else
+        log "No driver crash detected - normal interface down"
+    fi
+fi
+
+# On interface up, ensure monitor mode if configured
+if [[ "$ACTION" == "up" ]]; then
+    # Check if monitor mode service is enabled
+    if systemctl is-enabled mycowave-monitor.service >/dev/null 2>&1; then
+        log "Interface $IFACE up - monitor mode managed by mycowave-monitor.service"
+    fi
+fi
+
+exit 0
