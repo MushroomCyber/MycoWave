@@ -21,7 +21,7 @@ MycoWave is a version-aware, zero-intervention installer for the **Alpha AWUS036
 | Feature | Description |
 |---------|-------------|
 | **Auto-detection** | Kernel (6.6–6.18+), arch (x86_64/ARM64), Secure Boot, Kali version |
-| **Smart strategy selection** | In-kernel `rtw88` ≥ 6.14, Kali DKMS 6.6–6.13, Ac3rN patched 6.15+, aircrack-ng source |
+| **Smart strategy selection** | Ac3rN patched ≥ 6.15 (incl. 6.19+), in-kernel `rtw88` on 6.14, Kali DKMS 6.6–6.13, aircrack-ng source < 6.6 |
 | **Driver conflict resolution** | Auto-blacklists competing drivers (DKMS vs in-kernel) |
 | **Monitor mode automation** | udev rules + NetworkManager dispatcher + systemd service |
 | **Performance optimizations** | `--performance` flag: USB2 force, powersave disable, TX power max, 5GHz unlock |
@@ -65,10 +65,11 @@ After install, just **plug in the AWUS036ACH** — monitor mode starts automatic
 
 | Kernel Version | Strategy | Driver |
 |----------------|----------|--------|
-| **≥ 6.14** (Kali 2026.1+) | `inkernel` | In-kernel `rtw_8812au` (mac80211) |
+| **≥ 6.19** | `ac3rn` | Ac3rN patched DKMS (ccflags-y/radio_idx/timer pattern, Kenji776/shchuchkin) |
 | **6.15 – 6.18** | `ac3rn` | Ac3rN patched DKMS (fixes timer/cfg80211 API) |
+| **6.14** | `inkernel` | In-kernel `rtw_8812au` (mac80211) |
 | **6.6 – 6.13** | `kali-dkms` | Kali `realtek-rtl88xxau-dkms` package |
-| **< 6.6** | `aircrack-ng` | Latest aircrack-ng/rtl8812au source |
+| **< 6.6** | `aircrack-ng` | aircrack-ng/rtl8812au source (see also lwfinger/rtw88 backport) |
 
 Force a specific method:
 ```bash
@@ -106,7 +107,7 @@ Options:
 
 ## Performance Optimizations (`--performance`)
 
-Applies a tuned `/etc/modprobe.d/mycowave-performance.conf`:
+Applies a tuned `/etc/modprobe.d/awus036ach-performance.conf`:
 
 ```bash
 # Force USB 2.0 mode (avoids 2.4GHz interference, stable)
@@ -132,15 +133,15 @@ rtw_country_code=BO
 ```
 ├── /etc/modprobe.d/
 │   ├── blacklist-rtl88xxau.conf      # Or blacklist-rtw88.conf
-│   ├── mycowave-performance.conf     # (with --performance)
+│   ├── awus036ach-performance.conf   # (with --performance)
 ├── /etc/udev/rules.d/
-│   └── 90-mycowave.rules             # Consistent wlan0 naming
+│   └── 90-awus036ach.rules           # Consistent wlan0 naming
 ├── /etc/NetworkManager/dispatcher.d/
-│   └── 99-mycowave-monitor           # Auto monitor on plug
+│   └── 99-awus036ach-monitor         # Auto monitor on plug
 ├── /etc/systemd/system/
-│   └── mycowave-monitor.service      # Boot-time monitor mode
+│   └── awus036ach-monitor.service    # Boot-time monitor mode
 ├── /etc/initramfs-tools/scripts/init-top/
-│   └── mycowave                       # Early driver load
+│   └── awus036ach                     # Early driver load
 ├── /lib/firmware/rtlwifi/
 │   └── rtw88xx_fw.bin                 # Latest firmware
 └── /var/log/mycowave-install.log      # Install log

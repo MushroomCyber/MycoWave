@@ -10,10 +10,14 @@ MycoWave automatically selects the optimal driver strategy based on your kernel 
 
 | Kernel Version | Strategy | Driver Source | Notes |
 |----------------|----------|---------------|-------|
-| **≥ 6.14** | `inkernel` | In-kernel `rtw88` | Native mac80211, no DKMS needed |
+| **≥ 6.19** | `ac3rn` | Ac3rN patched DKMS | ccflags-y/radio_idx/timer pattern (Kenji776/shchuchkin) |
 | **6.15 – 6.18** | `ac3rn` | Ac3rN patched DKMS | Fixes kernel API breaks |
+| **6.14** | `inkernel` | In-kernel `rtw88` | Native mac80211, no DKMS needed |
 | **6.6 – 6.13** | `kali-dkms` | Kali `realtek-rtl88xxau-dkms` | Pre-built, auto-rebuilds |
-| **< 6.6** | `aircrack-ng` | aircrack-ng/rtl8812au source | Latest monitor/injection fixes |
+| **< 6.6** | `aircrack-ng` | aircrack-ng/rtl8812au source | Latest monitor/injection fixes; see also lwfinger/rtw88 backport |
+
+> Ranges are disjoint and checked highest-first: `ac3rn` is tested before `inkernel`
+> so it stays reachable (a broad `≥ 6.14` check placed first would shadow it).
 
 Force a specific strategy:
 ```bash
@@ -24,7 +28,7 @@ sudo ./mycowave-install.sh --force-method inkernel
 
 ## Strategy Details
 
-### 1. In-Kernel `rtw88` (`inkernel`) — Kernel ≥ 6.14
+### 1. In-Kernel `rtw88` (`inkernel`) — Kernel 6.14 (exactly)
 
 **Best for**: Modern distributions (Kali 2026.1+, Fedora 40+, Ubuntu 24.04+, Arch)
 
@@ -53,7 +57,7 @@ rtw88_8812au      # RTL8812AU USB interface
 
 ---
 
-### 2. Ac3rN Patched DKMS (`ac3rn`) — Kernel 6.15–6.18
+### 2. Ac3rN Patched DKMS (`ac3rn`) — Kernel ≥ 6.15 (incl. 6.19+)
 
 **Best for**: Systems on kernel 6.15+ where in-kernel not available or DKMS preferred
 
@@ -117,7 +121,8 @@ rtw88_8812au      # RTL8812AU USB interface
 - **CGarces**: Kernel 4.15 support
 - **brimstone**: Kernel 4.14 support
 
-**Status**: **DEPRECATED** upstream — "Use mac80211 drivers over at lwfinger/rtw88"
+**Status**: **DEPRECATED** upstream — "Use mac80211 drivers over at lwfinger/rtw88".
+For a maintained backport path on older kernels, see https://github.com/lwfinger/rtw88.
 
 **Advantages**:
 - Best monitor mode / frame injection support
@@ -187,7 +192,7 @@ After installation, MycoWave verifies:
 # Check current driver
 lsmod | grep -E '88XXau|rtw_8812au|8812au|8821au'
 
-# Switch to in-kernel (kernel ≥ 6.14)
+# Switch to in-kernel (kernel 6.14)
 sudo modprobe -r 88XXau 2>/dev/null
 sudo modprobe rtw_8812au
 

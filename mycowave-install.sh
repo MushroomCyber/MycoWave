@@ -28,6 +28,7 @@ ENABLE_THERMAL=false
 ENABLE_COEX=false
 SKIP_CRASH_COLLECTOR=false
 RUN_TEST_SUITE=false
+REMOVE_MOK_KEYS=false
 
 # Colors for output
 RED='\033[0;31m'
@@ -38,13 +39,34 @@ CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 # ─── Logging Helpers ────────────────────────────────────────────────────────
-log()     { echo -e "${BLUE}[$(date '+%H:%M:%S')]${NC} $*" | tee -a "$LOG_FILE"; }
-info()    { echo -e "${CYAN}[INFO]${NC} $*" | tee -a "$LOG_FILE"; }
-warn()    { echo -e "${YELLOW}[WARN]${NC} $*" | tee -a "$LOG_FILE"; }
-error()   { echo -e "${RED}[ERROR]${NC} $*" | tee -a "$LOG_FILE"; }
-success() { echo -e "${GREEN}[OK]${NC} $*" | tee -a "$LOG_FILE"; }
+# In DRY_RUN mode file appends are skipped (stdout only) so a missing
+# /var/log file or gated mkdir/touch cannot abort the run.
+_log_emit() {
+    local msg="$1"
+    if [[ "$DRY_RUN" == true ]]; then
+        echo -e "$msg"
+    else
+        echo -e "$msg" | tee -a "$LOG_FILE"
+    fi
+}
+log()     { _log_emit "${BLUE}[$(date '+%H:%M:%S')]${NC} $*"; }
+info()    { _log_emit "${CYAN}[INFO]${NC} $*"; }
+warn()    { _log_emit "${YELLOW}[WARN]${NC} $*"; }
+error()   { _log_emit "${RED}[ERROR]${NC} $*"; }
+success() { _log_emit "${GREEN}[OK]${NC} $*"; }
 verbose() { [[ "$VERBOSE" == true ]] && log "$*" || true; }
 run()     { verbose "→ $*"; [[ "$DRY_RUN" == true ]] || eval "$*"; }
+# Centralized file writer: respects DRY_RUN. Usage: dry_write DEST <<EOF ... EOF
+dry_write() {
+    local dest="$1"
+    if [[ "$DRY_RUN" == true ]]; then
+        info "[dry-run] would write $dest"
+        cat >/dev/null
+        return 0
+    fi
+    mkdir -p "$(dirname "$dest")"
+    cat > "$dest"
+}
 
 # ─── Utility Functions ──────────────────────────────────────────────────────
 require_root() {
@@ -110,8 +132,8 @@ detect_driver_conflicts() {
     INKERNEL_LOADED=false
     CONFLICT_DETECTED=false
 
-    lsmod | grep -q '^88XXau' && DKMS_LOADED=true
-    lsmod | grep -q '^rtw_8812au' && INKERNEL_LOADED=true
+    lsmod | grep -q '^88XXau' && DKMS_LOADED=true || true
+    lsmod | grep -q '^rtw_8812au' && INKERNEL_LOADED=true || true
 
     if [[ "$DKMS_LOADED" == true && "$INKERNEL_LOADED" == true ]]; then
         CONFLICT_DETECTED=true
@@ -126,19 +148,29 @@ choose_strategy() {
         STRATEGY="$FORCE_METHOD"
         info "Forced strategy: $STRATEGY"
         return
-    }
+    fi
 
-    # Kernel >= 6.14 → in-kernel rtw88 (Linux 6.14+)
-    if (( KERNEL_MAJOR > 6 || (KERNEL_MAJOR == 6 && KERNEL_MINOR >= 14) )); then
-        STRATEGY="inkernel"
-        info "Kernel $KERNEL_VERSION ≥ 6.14 → using in-kernel rtw88 driver"
+    # Disjoint ranges — check highest first so ac3rn stays reachable
+    # (a broad >= 6.14 check placed first would shadow every branch below).
+    # Kernel >= 6.19 → Ac3rN patched DKMS (DKMS API breaks persist past 6.18;
+    # follows the Kenji776/shchuchkin pattern: ccflags-y, radio_idx, timer API).
+    if (( KERNEL_MAJOR > 6 || (KERNEL_MAJOR == 6 && KERNEL_MINOR >= 19) )); then
+        STRATEGY="ac3rn"
+        info "Kernel $KERNEL_VERSION ≥ 6.19 → using Ac3rN patched DKMS (ccflags-y/radio_idx/timer fixes)"
         return
     fi
 
-    # Kernel 6.15+ with broken DKMS → Ac3rN patched
-    if (( KERNEL_MAJOR == 6 && KERNEL_MINOR >= 15 )); then
+    # Kernel 6.15 - 6.18 → Ac3rN patched DKMS (fixes timer/cfg80211 API breaks)
+    if (( KERNEL_MAJOR == 6 && KERNEL_MINOR >= 15 && KERNEL_MINOR <= 18 )); then
         STRATEGY="ac3rn"
-        info "Kernel $KERNEL_VERSION ≥ 6.15 → using Ac3rN patched DKMS (fixes API breaks)"
+        info "Kernel $KERNEL_VERSION (6.15-6.18) → using Ac3rN patched DKMS (fixes API breaks)"
+        return
+    fi
+
+    # Kernel 6.14 (exactly) → in-kernel rtw88 (Linux 6.14 mac80211)
+    if (( KERNEL_MAJOR == 6 && KERNEL_MINOR == 14 )); then
+        STRATEGY="inkernel"
+        info "Kernel $KERNEL_VERSION (6.14) → using in-kernel rtw88 driver"
         return
     fi
 
@@ -149,42 +181,72 @@ choose_strategy() {
         return
     fi
 
-    # Older kernels → direct from aircrack-ng
+    # Older kernels → direct from aircrack-ng source.
+    # NOTE: aircrack-ng/rtl8812au is deprecated upstream ("use mac80211 drivers");
+    # for a maintained backport path see lwfinger/rtw88.
     STRATEGY="aircrack-ng"
-    info "Kernel $KERNEL_VERSION < 6.6 → using aircrack-ng source (latest fixes)"
+    info "Kernel $KERNEL_VERSION < 6.6 → using aircrack-ng source (see also lwfinger/rtw88 backport)"
 }
 
 # ─── Pre-Install Checks ─────────────────────────────────────────────────────
 check_prerequisites() {
     log "Checking prerequisites..."
 
-    # Internet connectivity
-    if ! ping -c1 -W2 8.8.8.8 >/dev/null 2>&1; then
-        warn "No internet connectivity detected. Some methods may fail."
+    # Network probe (warn-only): TCP handshake to Kali archive, no ICMP needed.
+    if command -v timeout >/dev/null 2>&1; then
+        if timeout 8 bash -c '</dev/tcp/archive.kali.org/443' >/dev/null 2>&1; then
+            verbose "Network probe OK (archive.kali.org:443 reachable)"
+        else
+            warn "Network probe failed (archive.kali.org:443 unreachable). Package installs may fail — continuing anyway."
+        fi
+    else
+        warn "Cannot probe network (timeout missing) — continuing anyway."
     fi
 
     # Required packages
     local missing=()
     for pkg in git dkms build-essential libelf-dev; do
-        dpkg -l "$pkg" >/dev/null 2>&1 || missing+=("$pkg")
+        dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q "ok installed" || missing+=("$pkg")
     done
 
-    # Kernel headers
-    local headers_pkg="linux-headers-$(uname -r)"
-    if [[ "$ARCH_TYPE" == "arm64" ]] && [[ "$OS_ID" == "kali" ]]; then
-        # Raspberry Pi needs special headers
-        if dpkg -l kalipi-kernel-headers >/dev/null 2>&1; then
-            headers_pkg="kalipi-kernel-headers"
+    # Kernel headers: exact headers preferred; fall back to meta-package (warn, not fail).
+    local headers_exact="linux-headers-$(uname -r)"
+    if [[ "$ARCH_TYPE" == "arm64" ]]; then
+        # Raspberry Pi / generic ARM64
+        if dpkg-query -W -f='${Status}' kalipi-kernel-headers 2>/dev/null | grep -q "ok installed"; then
+            verbose "kalipi-kernel-headers already installed"
+        elif dpkg-query -W -f='${Status}' linux-headers-arm64 2>/dev/null | grep -q "ok installed"; then
+            warn "kalipi-kernel-headers not installed; generic linux-headers-arm64 present — continuing (Pi-specific builds may fail)."
         else
+            warn "No ARM64 headers found; will try kalipi-kernel-headers (warn-only, install may fail on non-Pi)."
             missing+=("kalipi-kernel-headers")
         fi
+    else
+        if ! dpkg-query -W -f='${Status}' "$headers_exact" 2>/dev/null | grep -q "ok installed"; then
+            local headers_meta="linux-headers-amd64"
+            if dpkg-query -W -f='${Status}' "$headers_meta" 2>/dev/null | grep -q "ok installed"; then
+                warn "$headers_exact not installed but $headers_meta is present — continuing (DKMS may still build)."
+            else
+                warn "$headers_exact missing; will try installing it (warn-only if unavailable for this Kali kernel)."
+                missing+=("$headers_exact")
+            fi
+        fi
     fi
-    dpkg -l "$headers_pkg" >/dev/null 2>&1 || missing+=("$headers_pkg")
+
+    # Helpful tools/binaries (warn-only, never fatal)
+    local tool=""
+    for tool in iw ethtool lsusb openssl mokutil airmon-ng; do
+        command -v "$tool" >/dev/null 2>&1 || warn "Optional tool '$tool' not found (install iw/ethtool/usbutils/openssl/mokutil/aircrack-ng as needed)."
+    done
 
     if [[ ${#missing[@]} -gt 0 ]]; then
         info "Installing missing packages: ${missing[*]}"
         run "apt-get update -qq"
-        run "apt-get install -y ${missing[*]}"
+        if [[ "$DRY_RUN" == true ]]; then
+            verbose "→ apt-get install -y ${missing[*]}"
+        else
+            apt-get install -y "${missing[@]}" || warn "Some packages failed to install — continuing anyway."
+        fi
     fi
     success "Prerequisites satisfied"
 }
@@ -193,13 +255,16 @@ check_prerequisites() {
 install_inkernel() {
     log "Installing: In-kernel rtw88 driver (Linux ≥ 6.14)"
 
-    # Blacklist DKMS driver to prevent conflict
-    run "echo 'blacklist 88XXau' > /etc/modprobe.d/blacklist-rtl88xxau.conf"
-    run "echo 'blacklist 8812au' >> /etc/modprobe.d/blacklist-rtl88xxau.conf"
-    run "echo 'blacklist 8814au' >> /etc/modprobe.d/blacklist-rtl88xxau.conf"
+    # Blacklist DKMS driver to prevent conflict (single write = idempotent)
+    dry_write /etc/modprobe.d/blacklist-rtl88xxau.conf <<'EOF'
+blacklist 88XXau
+blacklist 8812au
+blacklist 8814au
+EOF
 
     # Ensure rtw88 is not blacklisted
     run "rm -f /etc/modprobe.d/blacklist-rtw88.conf"
+    run "update-initramfs -u"
 
     # Load module
     run "modprobe rtw_8812au"
@@ -216,10 +281,13 @@ install_kali_dkms() {
     run "apt-get update -qq"
     run "apt-get install -y realtek-rtl88xxau-dkms realtek-rtl8814au-dkms"
 
-    # Blacklist in-kernel driver to prevent conflict
-    run "echo 'blacklist rtw_8812au' > /etc/modprobe.d/blacklist-rtw88.conf"
-    run "echo 'blacklist rtw_8821au' >> /etc/modprobe.d/blacklist-rtw88.conf"
-    run "echo 'blacklist rtw_8814au' >> /etc/modprobe.d/blacklist-rtw88.conf"
+    # Blacklist in-kernel driver to prevent conflict (single write = idempotent)
+    dry_write /etc/modprobe.d/blacklist-rtw88.conf <<'EOF'
+blacklist rtw_8812au
+blacklist rtw_8821au
+blacklist rtw_8814au
+EOF
+    run "update-initramfs -u"
 
     run "modprobe 88XXau"
     sleep 2
@@ -238,8 +306,13 @@ install_ac3rn() {
     run "git clone --depth 1 '$repo' '$dir'"
     run "chmod +x '$dir/install.sh'"
 
-    # Blacklist in-kernel driver
-    run "echo 'blacklist rtw_8812au' > /etc/modprobe.d/blacklist-rtw88.conf"
+    # Blacklist in-kernel driver (single write = idempotent)
+    dry_write /etc/modprobe.d/blacklist-rtw88.conf <<'EOF'
+blacklist rtw_8812au
+blacklist rtw_8821au
+blacklist rtw_8814au
+EOF
+    run "update-initramfs -u"
 
     run "'$dir/install.sh'"
 
@@ -260,8 +333,13 @@ install_aircrack_ng() {
     run "git clone --depth 1 '$repo' '$dir'"
     run "cd '$dir'"
 
-    # Blacklist in-kernel driver
-    run "echo 'blacklist rtw_8812au' > /etc/modprobe.d/blacklist-rtw88.conf"
+    # Blacklist in-kernel driver (single write = idempotent)
+    dry_write /etc/modprobe.d/blacklist-rtw88.conf <<'EOF'
+blacklist rtw_8812au
+blacklist rtw_8821au
+blacklist rtw_8814au
+EOF
+    run "update-initramfs -u"
 
     # Use DKMS install if available, else manual
     if [[ -f "$dir/dkms-install.sh" ]]; then
@@ -283,45 +361,49 @@ setup_performance_config() {
 
     log "Applying performance optimizations..."
 
-    # Determine which driver is active/will be active
-    local driver_module=""
-    case "$STRATEGY" in
-        inkernel) driver_module="rtw88_8812au" ;;
-        kali-dkms|ac3rn|aircrack-ng) driver_module="88XXau" ;;
-    esac
+    # Idempotency: remove any previous config so repeated runs never duplicate lines.
+    run "rm -f /etc/modprobe.d/awus036ach-performance.conf"
 
-    # Create performance modprobe.d config
-    cat > /etc/modprobe.d/awus036ach-performance.conf <<EOF
-# ─── AWUS036ACH Performance Optimizations ─────────────────────────────
+    if [[ "$STRATEGY" == "inkernel" ]]; then
+        # In-kernel rtw88: only rtw88_* options are valid here.
+        # DKMS-only opts (rtw_switch_usb_mode, rtw_tx_pwr_idx_override,
+        # rtw_monitor_*, rtw_country_code, rtw_ips_mode) are NOT valid for rtw88.
+        dry_write /etc/modprobe.d/awus036ach-performance.conf <<EOF
+# ─── AWUS036ACH Performance Optimizations (in-kernel rtw88) ───────────
 # Generated by $SCRIPT_NAME v$SCRIPT_VERSION on $(date)
 
-# Force USB 2.0 mode (stability > speed for RTL8812AU chipset)
-options $driver_module rtw_switch_usb_mode=2
+# rtw88 (in-kernel) specific options (mac80211 stack)
+options rtw88_core debug_mask=0x0
+options rtw88_core disable_lps_deep_mode=Y
 
-# Disable power save (prevents monitor mode drops and disconnects)
-options $driver_module rtw_ips_mode=0 rtw_lps_level=0
-
-# TX power override (commx/dernyn fork, aircrack-ng v4.3.21+)
-options $driver_module rtw_tx_pwr_idx_override=30
-
-# Monitor mode optimizations (aircrack-ng fork)
-options $driver_module rtw_monitor_disable_1m=1
-options $driver_module rtw_monitor_retransmit=1
-
-# Regulatory domain: Bolivia (full 5GHz channels, high power)
-options $driver_module rtw_country_code=BO
+# Regulatory domain is handled via cfg80211 (iw reg set $REG_DOMAIN),
+# not via module options, for the in-kernel driver.
 
 # ──────────────────────────────────────────────────────────────────────
 EOF
+    else
+        # DKMS driver (88XXau): vendor-style rtw_* options only.
+        dry_write /etc/modprobe.d/awus036ach-performance.conf <<EOF
+# ─── AWUS036ACH Performance Optimizations (DKMS 88XXau) ───────────────
+# Generated by $SCRIPT_NAME v$SCRIPT_VERSION on $(date)
 
-    # Also apply to rtw88 if using in-kernel
-    if [[ "$STRATEGY" == "inkernel" ]]; then
-        cat >> /etc/modprobe.d/awus036ach-performance.conf <<'EOF'
+# Force USB 2.0 mode (stability > speed for RTL8812AU chipset)
+options 88XXau rtw_switch_usb_mode=2
 
-# rtw88 (in-kernel) specific options
-options rtw88_8812au rtw_switch_usb_mode=2
-options rtw88_8812au rtw_lps_level=0
-options rtw88_core debug_mask=0x0
+# Disable power save (prevents monitor mode drops and disconnects)
+options 88XXau rtw_ips_mode=0 rtw_lps_level=0
+
+# TX power override (commx/dernyn fork, aircrack-ng v4.3.21+)
+options 88XXau rtw_tx_pwr_idx_override=30
+
+# Monitor mode optimizations (aircrack-ng fork)
+options 88XXau rtw_monitor_disable_1m=1
+options 88XXau rtw_monitor_retransmit=1
+
+# Regulatory domain: Bolivia (full 5GHz channels, high power)
+options 88XXau rtw_country_code=BO
+
+# ──────────────────────────────────────────────────────────────────────
 EOF
     fi
 
@@ -342,12 +424,17 @@ update_firmware() {
     run "mkdir -p '$fw_dir'"
 
     # Check if linux-firmware package has newer files
-    if dpkg -l linux-firmware >/dev/null 2>&1; then
+    if dpkg-query -W -f='${Status}' linux-firmware 2>/dev/null | grep -q "ok installed"; then
         local installed_version=$(dpkg-query -W -f='${Version}' linux-firmware 2>/dev/null || echo "unknown")
         verbose "linux-firmware version: $installed_version"
 
-        # Copy firmware if available in package
+        # Copy firmware if available in package (cmp reads are safe;
+        # all writes go through run() so DRY_RUN changes nothing).
         for fw in "${fw_files[@]}"; do
+            if [[ "$DRY_RUN" == true ]]; then
+                verbose "[dry-run] would compare/copy /lib/firmware/$fw → $fw_dir/"
+                continue
+            fi
             if [[ -f "/lib/firmware/$fw" ]] && ! cmp -s "/lib/firmware/$fw" "$fw_dir/$fw" 2>/dev/null; then
                 run "cp -f '/lib/firmware/$fw' '$fw_dir/'"
                 updated=true
@@ -359,6 +446,10 @@ update_firmware() {
     # Also check for rtw88 firmware in /usr/lib/firmware (some distros)
     if [[ -d "/usr/lib/firmware/rtlwifi" ]]; then
         for fw in "${fw_files[@]}"; do
+            if [[ "$DRY_RUN" == true ]]; then
+                verbose "[dry-run] would compare/copy /usr/lib/firmware/rtlwifi/$fw → $fw_dir/"
+                continue
+            fi
             if [[ -f "/usr/lib/firmware/rtlwifi/$fw" ]] && ! cmp -s "/usr/lib/firmware/rtlwifi/$fw" "$fw_dir/$fw" 2>/dev/null; then
                 run "cp -f '/usr/lib/firmware/rtlwifi/$fw' '$fw_dir/'"
                 updated=true
@@ -375,10 +466,12 @@ update_firmware() {
 }
 
 # ─── Secure Boot Setup ────────────────────────────────────────────────────────
+# PRE step: must run BEFORE the driver/DKMS install so keys exist first.
+# Signing happens in setup_secure_boot_post() AFTER the driver install.
 setup_secure_boot() {
     [[ "$ENABLE_SECURE_BOOT" != true ]] && { info "Secure Boot automation disabled (use --secure-boot)"; return; }
 
-    log "Setting up Secure Boot MOK automation..."
+    log "Setting up Secure Boot MOK automation (pre-install: keys first)..."
 
     # Check if mokutil is available
     if ! command -v mokutil >/dev/null 2>&1; then
@@ -426,6 +519,53 @@ setup_secure_boot() {
 
     info "To enroll MOK in UEFI, run: sudo $script_dst enroll"
     info "Then REBOOT and complete enrollment in the blue MOK Manager screen"
+}
+
+# Post-install Secure Boot step: sign freshly built DKMS modules.
+# Runs AFTER the driver install so there is something to sign.
+setup_secure_boot_post() {
+    [[ "$ENABLE_SECURE_BOOT" != true ]] && return 0
+
+    log "Signing DKMS modules for Secure Boot..."
+
+    local mok_dir="/var/lib/shim-signed/mok"
+    local mok_key="$mok_dir/MOK.priv"
+    local mok_cert="$mok_dir/MOK.der"
+
+    if [[ ! -f "$mok_key" || ! -f "$mok_cert" ]]; then
+        warn "MOK key/cert missing — skipping signing (pre step should have created them)."
+        return 0
+    fi
+
+    local kver; kver="$(uname -r)"
+    local sign_file="/lib/modules/$kver/build/scripts/sign-file"
+    if [[ ! -x "$sign_file" ]]; then
+        warn "sign-file not found at $sign_file (install linux-headers-$(uname -r) or the headers meta-package) — skipping signing."
+        warn "Unsigned DKMS modules will fail to load with Secure Boot enabled."
+        return 0
+    fi
+
+    local signed_any=false
+    local ko=""
+    while IFS= read -r ko; do
+        [[ -z "$ko" ]] && continue
+        if [[ "$DRY_RUN" == true ]]; then
+            verbose "[dry-run] would sign $ko"
+        else
+            "$sign_file" sha256 "$mok_key" "$mok_cert" "$ko" \
+                && { info "Signed: $ko"; signed_any=true; } \
+                || warn "Failed to sign $ko"
+        fi
+    done < <(find "/lib/modules/$kver/updates/dkms" -name '88XXau.ko*' 2>/dev/null || true)
+
+    if [[ "$signed_any" == true ]]; then
+        success "DKMS modules signed with MOK key"
+    else
+        warn "No DKMS modules found to sign under /lib/modules/$kver/updates/dkms (or dry-run)."
+    fi
+
+    info "DKMS will auto-rebuild on kernel upgrades (dkms autoinstall); re-run this signing step after each rebuild."
+    info "REBOOT REQUIRED: enroll the MOK key first (sudo mycowave-enroll-mok enroll), then reboot."
 }
 
 # ─── Pi/ARM64 Optimizations Setup ────────────────────────────────────────────
@@ -497,10 +637,18 @@ setup_watchdog() {
         warn "99-mycowave-wifi-recover not found at $nm_src"
     fi
 
-    # Enable and start
+    # Enable and start (idempotent: skip if already enabled/active)
     run "systemctl daemon-reload"
-    run "systemctl enable mycowave-watchdog.service"
-    run "systemctl start mycowave-watchdog.service"
+    if systemctl is-enabled mycowave-watchdog.service >/dev/null 2>&1; then
+        verbose "mycowave-watchdog.service already enabled"
+    else
+        run "systemctl enable mycowave-watchdog.service"
+    fi
+    if systemctl is-active mycowave-watchdog.service >/dev/null 2>&1; then
+        verbose "mycowave-watchdog.service already active"
+    else
+        run "systemctl start mycowave-watchdog.service"
+    fi
 
     success "Watchdog service installed and started"
 }
@@ -550,8 +698,27 @@ setup_coex() {
         kali-dkms|ac3rn|aircrack-ng) driver_module="88XXau" ;;
     esac
 
-    # Create coex config
-    cat > /etc/modprobe.d/mycowave-coex.conf <<EOF
+    # Prefer the shipped template when available; fall back to inline config.
+    local coex_src="$(dirname "${BASH_SOURCE[0]}")/scripts/mycowave-coex.conf"
+    if [[ -f "$coex_src" ]]; then
+        info "Using template $coex_src"
+        if [[ "$DRY_RUN" == true ]]; then
+            info "[dry-run] would copy $coex_src → /etc/modprobe.d/mycowave-coex.conf"
+        else
+            mkdir -p /etc/modprobe.d
+            cp "$coex_src" /etc/modprobe.d/mycowave-coex.conf
+        fi
+        run "printf '# MycoWave auto-detect: generated on %s | internal BT: $has_bt | driver: $driver_module\n' \"\$(date)\" >> /etc/modprobe.d/mycowave-coex.conf"
+        if [[ "$STRATEGY" == "inkernel" ]]; then
+            [[ "$has_bt" == true ]] && info "Internal Bluetooth detected - coexistence ENABLED (see template)" \
+                                    || info "No internal Bluetooth - coexistence DISABLED (see template)"
+        else
+            info "DKMS driver - coexistence is compile-time only (see template)"
+        fi
+    else
+        info "Template not found at $coex_src - writing inline config"
+        # Create coex config
+        dry_write /etc/modprobe.d/mycowave-coex.conf <<EOF
 # MycoWave - Bluetooth Coexistence Configuration
 # Generated on $(date)
 # Internal BT detected: $has_bt
@@ -559,29 +726,30 @@ setup_coex() {
 
 EOF
 
-    if [[ "$STRATEGY" == "inkernel" ]]; then
-        if [[ "$has_bt" == true ]]; then
-            cat >> /etc/modprobe.d/mycowave-coex.conf <<'EOF'
+        if [[ "$STRATEGY" == "inkernel" ]]; then
+            if [[ "$has_bt" == true ]]; then
+                run "cat >> /etc/modprobe.d/mycowave-coex.conf <<'EOF2'
 # Internal Bluetooth detected - enable coexistence
 options rtw88_core rtw_btcoex_enable=1
 # Antenna sharing: 0=dedicated, 1=shared (check EFUSE)
 # options rtw88_core rtw_btcoex_ant_num=0
-EOF
-            info "Internal Bluetooth detected - coexistence ENABLED"
-        else
-            cat >> /etc/modprobe.d/mycowave-coex.conf <<'EOF'
+EOF2"
+                info "Internal Bluetooth detected - coexistence ENABLED"
+            else
+                run "cat >> /etc/modprobe.d/mycowave-coex.conf <<'EOF2'
 # No internal Bluetooth - disable coexistence to reduce overhead
 options rtw88_core rtw_btcoex_enable=0
-EOF
-            info "No internal Bluetooth - coexistence DISABLED"
-        fi
-    else
-        cat >> /etc/modprobe.d/mycowave-coex.conf <<'EOF'
+EOF2"
+                info "No internal Bluetooth - coexistence DISABLED"
+            fi
+        else
+            run "cat >> /etc/modprobe.d/mycowave-coex.conf <<'EOF2'
 # DKMS driver (88XXau) - coexistence controlled at compile time (CONFIG_RTW_COEX)
 # No runtime module parameters available for coex in DKMS driver
 # If internal BT present, ensure driver was built with CONFIG_RTW_COEX=y
-EOF
-        info "DKMS driver - coexistence is compile-time only"
+EOF2"
+            info "DKMS driver - coexistence is compile-time only"
+        fi
     fi
 
     success "Bluetooth coexistence config written to /etc/modprobe.d/mycowave-coex.conf"
@@ -606,7 +774,7 @@ setup_crash_collector() {
     fi
 
     # Create systemd timer for periodic collection (optional)
-    cat > /etc/systemd/system/mycowave-crash-collector.timer <<'EOF'
+    dry_write /etc/systemd/system/mycowave-crash-collector.timer <<'EOF'
 [Unit]
 Description=MycoWave Periodic Crash Dump Collection
 Documentation=https://github.com/MushroomCyber/MycoWave
@@ -620,7 +788,7 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
-    cat > /etc/systemd/system/mycowave-crash-collector.service <<'EOF'
+    dry_write /etc/systemd/system/mycowave-crash-collector.service <<'EOF'
 [Unit]
 Description=MycoWave Crash Dump Collector
 Documentation=https://github.com/MushroomCyber/MycoWave
@@ -642,8 +810,16 @@ CapabilityBoundingSet=CAP_DAC_READ_SEARCH
 EOF
 
     run "systemctl daemon-reload"
-    run "systemctl enable mycowave-crash-collector.timer"
-    run "systemctl start mycowave-crash-collector.timer"
+    if systemctl is-enabled mycowave-crash-collector.timer >/dev/null 2>&1; then
+        verbose "mycowave-crash-collector.timer already enabled"
+    else
+        run "systemctl enable mycowave-crash-collector.timer"
+    fi
+    if systemctl is-active mycowave-crash-collector.timer >/dev/null 2>&1; then
+        verbose "mycowave-crash-collector.timer already active"
+    else
+        run "systemctl start mycowave-crash-collector.timer"
+    fi
 
     success "Crash collector installed with hourly timer"
 }
@@ -653,16 +829,19 @@ setup_monitor_mode() {
     [[ "$SKIP_MONITOR_SETUP" == true ]] && { info "Skipping monitor mode setup"; return; }
 
     log "Configuring automatic monitor mode..."
+    warn "Monitor setup renames 88XXau/rtw_8812au interfaces to wlan0 and the boot-time"
+    warn "service runs 'airmon-ng check kill' (kills NetworkManager). On multi-NIC systems"
+    warn "this can disrupt other interfaces — re-run with --skip-monitor to opt out."
 
     # 1. Create udev rule for consistent interface naming
-    cat > /etc/udev/rules.d/90-awus036ach.rules <<'EOF'
+    dry_write /etc/udev/rules.d/90-awus036ach.rules <<'EOF'
 # Alpha AWUS036ACH - consistent naming
 SUBSYSTEM=="net", ACTION=="add", DRIVERS=="88XXau", NAME="wlan0"
 SUBSYSTEM=="net", ACTION=="add", DRIVERS=="rtw_8812au", NAME="wlan0"
 EOF
 
     # 2. Create NetworkManager dispatcher to auto-enable monitor mode on plug
-    cat > /etc/NetworkManager/dispatcher.d/99-awus036ach-monitor <<'EOF'
+    dry_write /etc/NetworkManager/dispatcher.d/99-awus036ach-monitor <<'EOF'
 #!/bin/bash
 # Auto-enable monitor mode for AWUS036ACH on interface up
 
@@ -680,7 +859,7 @@ EOF
     run "chmod +x /etc/NetworkManager/dispatcher.d/99-awus036ach-monitor"
 
     # 3. systemd service for boot-time monitor mode (optional, enabled by default)
-    cat > /etc/systemd/system/awus036ach-monitor.service <<'EOF'
+    dry_write /etc/systemd/system/awus036ach-monitor.service <<'EOF'
 [Unit]
 Description=Enable monitor mode for Alpha AWUS036ACH
 After=network.target
@@ -697,23 +876,39 @@ WantedBy=multi-user.target
 EOF
 
     run "systemctl daemon-reload"
-    run "systemctl enable awus036ach-monitor.service"
+    if systemctl is-enabled awus036ach-monitor.service >/dev/null 2>&1; then
+        verbose "awus036ach-monitor.service already enabled"
+    else
+        run "systemctl enable awus036ach-monitor.service"
+    fi
 
     # 4. Regulatory domain for 5GHz channels
     run "iw reg set $REG_DOMAIN"
-    echo "REGDOMAIN=$REG_DOMAIN" > /etc/default/crda
+    dry_write /etc/default/crda <<EOF
+REGDOMAIN=$REG_DOMAIN
+EOF
 
     success "Monitor mode automation configured"
 }
 
 setup_dkms_autorebuild() {
+    # In-kernel strategy needs no DKMS rebuild machinery or early module probe.
+    if [[ "$STRATEGY" == "inkernel" ]]; then
+        info "In-kernel strategy: skipping DKMS auto-rebuild (no DKMS modules, no initramfs hook needed)"
+        return 0
+    fi
+
     log "Configuring DKMS auto-rebuild on kernel upgrade..."
 
-    # Ensure dkms service is enabled
-    run "systemctl enable dkms.service 2>/dev/null || true"
+    # Ensure dkms service is enabled (idempotent)
+    if systemctl is-enabled dkms.service >/dev/null 2>&1; then
+        verbose "dkms.service already enabled"
+    else
+        run "systemctl enable dkms.service 2>/dev/null || true"
+    fi
 
     # Create hook for initramfs update (ensures driver in initramfs for early boot)
-    cat > /etc/initramfs-tools/scripts/init-top/awus036ach <<'EOF'
+    dry_write /etc/initramfs-tools/scripts/init-top/awus036ach <<'EOF'
 #!/bin/sh
 # Load AWUS036ACH driver early for initramfs
 modprobe 88XXau 2>/dev/null || modprobe rtw_8812au 2>/dev/null || true
@@ -728,7 +923,9 @@ EOF
 verify_install() {
     [[ "$SKIP_VERIFY" == true ]] && { info "Skipping verification"; return; }
 
-    log "Verifying installation..."
+    # Smoke check only: module + interface. Deeper checks (monitor mode,
+    # injection, channels) live in the --test suite. Never kills NetworkManager here.
+    log "Verifying installation (smoke: module + interface)..."
 
     local iface=""
     local driver=""
@@ -755,38 +952,8 @@ verify_install() {
         return 1
     fi
 
-    # Test monitor mode
-    info "Testing monitor mode..."
-    run "airmon-ng check kill"
-    if run "airmon-ng start $iface"; then
-        local mon_iface="${iface}mon"
-        # Verify monitor interface exists
-        if [[ -e "/sys/class/net/$mon_iface" ]]; then
-            success "Monitor mode: WORKING ($mon_iface)"
-
-            # Test injection (requires nearby AP, so just check capability)
-            info "Checking injection capability..."
-            if iw dev "$mon_iface" info | grep -q "monitor"; then
-                success "Injection capability: AVAILABLE"
-            fi
-
-            # Cleanup test monitor
-            run "airmon-ng stop $mon_iface >/dev/null 2>&1 || true"
-        else
-            error "Monitor mode interface not created"
-            return 1
-        fi
-    else
-        error "Failed to enable monitor mode"
-        return 1
-    fi
-
-    # Check 5GHz channels
-    info "Checking 5GHz channel availability..."
-    local chans=$(iw phy "$(cat /sys/class/net/$iface/phy80211/name)" channels 2>/dev/null | grep -c "5[0-9][0-9][0-9]" || echo 0)
-    info "5GHz channels available: $chans"
-
-    success "All verification checks passed"
+    success "Smoke verification passed (module loaded, $iface present)"
+    info "Run with --test for full checks (monitor mode, injection, 5GHz, VHT/HT)"
 }
 
 # ─── Comprehensive Test Suite ─────────────────────────────────────────────────
@@ -804,77 +971,98 @@ run_full_test_suite() {
 
     local all_passed=true
 
+    # Resolve the phy for this interface (never assume phy0).
+    local phy=""
+    if [[ -f "/sys/class/net/$iface/phy80211/name" ]]; then
+        phy=$(cat "/sys/class/net/$iface/phy80211/name" 2>/dev/null || echo "")
+    fi
+    [[ -z "$phy" ]] && phy="phy0"
+    verbose "Suite: iface=$iface phy=$phy"
+
+    # Expected module derived from the chosen strategy (explicit, no globals).
+    local expected_module=""
+    case "$STRATEGY" in
+        inkernel) expected_module="rtw_8812au" ;;
+        kali-dkms|ac3rn|aircrack-ng) expected_module="88XXau" ;;
+        *) expected_module="88XXau" ;;
+    esac
+
+    # NOTE: every run_test call ends with || true so a failing test never
+    # aborts the suite under set -e; the summary below is always reached.
+
     # Test 1: Driver loaded & version
-    run_test "Driver module loaded" "lsmod | grep -qE '^(88XXau|rtw_8812au)'"
+    run_test "Driver module loaded" "lsmod | grep -qE '^(88XXau|rtw_8812au)'" || true
 
     # Test 2: Interface up
-    run_test "Interface $iface exists" "[[ -e /sys/class/net/$iface ]]"
+    run_test "Interface $iface exists" "[[ -e /sys/class/net/$iface ]]" || true
 
     # Test 3: Interface carrier (link detection capability)
-    run_test "Interface has carrier detection" "ethtool $iface 2>/dev/null | grep -q 'Link detected'"
+    run_test "Interface has carrier detection" "ethtool $iface 2>/dev/null | grep -q 'Link detected'" || true
 
-    # Test 4: TX power setting
-    run_test "TX power configurable" "iw dev $iface set txpower fixed 2000 2>/dev/null || true"
+    # Test 4: TX power setting (real check — no || true inside the probe)
+    run_test "TX power configurable" "iw dev $iface set txpower fixed 2000" || true
 
     # Test 5: Regulatory domain
     local reg=$(iw reg get 2>/dev/null | grep -i country | head -1 | awk '{print $2}' || echo "00")
-    run_test "Regulatory domain set ($reg)" "[[ '$reg' != '00' ]]"
+    run_test "Regulatory domain set ($reg)" "[[ '$reg' != '00' ]]" || true
 
     # Test 6: Channel list populated
-    run_test "Channel list available" "iw phy phy0 channels 2>/dev/null | grep -q MHz"
+    run_test "Channel list available" "iw phy $phy channels 2>/dev/null | grep -q MHz" || true
 
-    # Test 7: 5GHz channels present
-    local ch5=$(iw phy phy0 channels 2>/dev/null | grep -c "5[0-9][0-9][0-9]" || echo 0)
-    run_test "5GHz channels available ($ch5)" "[[ $ch5 -gt 0 ]]"
+    # Test 7: 5GHz channels present (grep -c prints 0 with exit 1 on no match;
+    # use || true so output stays a single clean number for arithmetic)
+    local ch5; ch5=$(iw phy "$phy" channels 2>/dev/null | grep -c "5[0-9][0-9][0-9]" || true)
+    ch5=$(printf '%s' "$ch5" | head -n1 | tr -cd '0-9')
+    [[ -z "$ch5" ]] && ch5=0
+    run_test "5GHz channels available ($ch5)" "[[ $ch5 -gt 0 ]]" || true
 
     # Test 8: VHT capabilities (802.11ac)
-    run_test "VHT (802.11ac) supported" "iw phy phy0 info 2>/dev/null | grep -qi vht"
+    run_test "VHT (802.11ac) supported" "iw phy $phy info 2>/dev/null | grep -qi vht" || true
 
     # Test 9: HT capabilities (802.11n)
-    run_test "HT (802.11n) supported" "iw phy phy0 info 2>/dev/null | grep -qi ht"
+    run_test "HT (802.11n) supported" "iw phy $phy info 2>/dev/null | grep -qi ht" || true
 
     # Test 10: Monitor mode
-    run_test "Monitor mode works" "airmon-ng check kill >/dev/null 2>&1 && airmon-ng start $iface >/dev/null 2>&1"
+    run_test "Monitor mode works" "airmon-ng check kill >/dev/null 2>&1 && airmon-ng start $iface >/dev/null 2>&1" || true
 
     # Test 11: Injection capability (monitor interface exists)
     local mon="${iface}mon"
-    run_test "Monitor interface created ($mon)" "[[ -e /sys/class/net/$mon ]]"
+    run_test "Monitor interface created ($mon)" "[[ -e /sys/class/net/$mon ]]" || true
 
     # Test 12: Cleanup monitor
-    run_test "Monitor cleanup works" "airmon-ng stop $mon >/dev/null 2>&1 || true"
+    run_test "Monitor cleanup works" "airmon-ng stop $mon >/dev/null 2>&1" || true
 
     # Test 13: USB device responsive
-    run_test "USB device responsive" "lsusb -d 0bda:a811 2>/dev/null | grep -q Realtek"
+    run_test "USB device responsive" "lsusb -d 0bda:a811 2>/dev/null | grep -q Realtek" || true
 
     # Test 14: No driver conflict
-    run_test "No driver conflict (single driver)" "! (lsmod | grep -q '^88XXau' && lsmod | grep -q '^rtw_8812au')"
+    run_test "No driver conflict (single driver)" "! (lsmod | grep -q '^88XXau' && lsmod | grep -q '^rtw_8812au')" || true
 
     # Test 15: Module parameters applied (if performance enabled)
     if [[ "$ENABLE_PERFORMANCE" == true ]]; then
-        local params=$(cat /sys/module/${driver_module:-88XXau}/parameters/ 2>/dev/null | head -5 || echo "")
-        run_test "Module parameters directory accessible" "[[ -d /sys/module/${driver_module:-88XXau}/parameters/ ]]"
+        run_test "Module parameters directory accessible ($expected_module)" "[[ -d /sys/module/$expected_module/parameters ]]" || true
     fi
 
     # Test 16: Firmware loaded
-    run_test "Firmware files present" "ls /lib/firmware/rtlwifi/rtw8812a_fw.bin 2>/dev/null || ls /lib/firmware/rtw8812a_fw.bin 2>/dev/null"
+    run_test "Firmware files present" "ls /lib/firmware/rtlwifi/rtw8812a_fw.bin 2>/dev/null || ls /lib/firmware/rtw8812a_fw.bin 2>/dev/null" || true
 
     # Test 17: Thermal zone accessible (if thermal enabled)
     if [[ "$ENABLE_THERMAL" == true ]]; then
-        run_test "Thermal monitoring accessible" "[[ -d /sys/kernel/debug/rtw88 ]] || [[ -d /sys/class/thermal ]]"
+        run_test "Thermal monitoring accessible" "[[ -d /sys/kernel/debug/rtw88 ]] || [[ -d /sys/class/thermal ]]" || true
     fi
 
     # Test 18: Watchdog service active (if watchdog enabled)
     if [[ "$ENABLE_WATCHDOG" == true ]]; then
-        run_test "Watchdog service active" "systemctl is-active mycowave-watchdog.service 2>/dev/null | grep -q active"
+        run_test "Watchdog service active" "systemctl is-active mycowave-watchdog.service 2>/dev/null | grep -q active" || true
     fi
 
     # Test 19: Crash collector timer (if enabled)
     if [[ "$SKIP_CRASH_COLLECTOR" != true ]]; then
-        run_test "Crash collector timer enabled" "systemctl is-enabled mycowave-crash-collector.timer 2>/dev/null | grep -q enabled"
+        run_test "Crash collector timer enabled" "systemctl is-enabled mycowave-crash-collector.timer 2>/dev/null | grep -q enabled" || true
     fi
 
     # Test 20: udev rules installed
-    run_test "udev rules installed" "[[ -f /etc/udev/rules.d/90-awus036ach.rules ]]"
+    run_test "udev rules installed" "[[ -f /etc/udev/rules.d/90-awus036ach.rules ]]" || true
 
     echo
     if [[ "$all_passed" == true ]]; then
@@ -951,8 +1139,20 @@ uninstall_driver() {
     run "rm -f /usr/local/bin/thermal-monitor"
     run "rm -f /usr/local/bin/mycowave-collect-crash"
 
-    # Remove MOK keys
-    run "rm -rf /var/lib/shim-signed/mok"
+    # Remove multi-user.target.wants symlinks left by service enables
+    run "rm -f /etc/systemd/system/multi-user.target.wants/awus036ach-monitor.service"
+    run "rm -f /etc/systemd/system/multi-user.target.wants/mycowave-watchdog.service"
+    run "rm -f /etc/systemd/system/multi-user.target.wants/mycowave-thermal.service"
+    run "rm -f /etc/systemd/system/multi-user.target.wants/mycowave-cpu-governor.service"
+    run "rm -f /etc/systemd/system/timers.target.wants/mycowave-crash-collector.timer"
+
+    # MOK keys: warn-only by default — the UEFI enrollment persists regardless.
+    if [[ "$REMOVE_MOK_KEYS" == true ]]; then
+        run "rm -rf /var/lib/shim-signed/mok"
+        warn "MOK keys deleted. NOTE: the UEFI key enrollment REMAINS in firmware — remove it via your UEFI MOK Manager if needed."
+    else
+        warn "MOK keys KEPT at /var/lib/shim-signed/mok (UEFI enrollment remains). Re-run with --remove-mok to delete them."
+    fi
 
     # Remove crash dumps
     run "rm -rf /var/log/mycowave-crashes"
@@ -965,10 +1165,18 @@ uninstall_driver() {
     run "modprobe -r rtw_8821au 2>/dev/null || true"
     run "modprobe -r rtw_8814au 2>/dev/null || true"
 
-    # Remove DKMS packages
-    run "dkms remove -m rtl8812au -v all --all 2>/dev/null || true"
+    # Remove DKMS modules (correct names: rtl88xxau/88XXau, rtl8814au)
+    run "dkms remove -m rtl88xxau -v all --all 2>/dev/null || true"
+    run "dkms remove -m 88XXau -v all --all 2>/dev/null || true"
     run "dkms remove -m rtl8814au -v all --all 2>/dev/null || true"
+    run "dkms remove -m rtl8812au -v all --all 2>/dev/null || true"
     run "apt-get purge -y realtek-rtl88xxau-dkms realtek-rtl8814au-dkms 2>/dev/null || true"
+
+    # Remove leftover DKMS sources, installer clones, regdomain, firmware copies
+    run "rm -rf /usr/src/rtl88xxau-* /usr/src/rtl8812au-* /usr/src/rtl8814au-*"
+    run "rm -rf /tmp/realtek-rtl88xxau-auto-installer /tmp/rtl8812au"
+    run "rm -f /etc/default/crda"
+    run "rm -f /lib/firmware/rtlwifi/rtw8812a_fw.bin /lib/firmware/rtlwifi/rtw8821a_fw.bin /lib/firmware/rtlwifi/rtw8812b_fw.bin"
 
     success "Uninstall complete. Reboot recommended."
 }
@@ -977,7 +1185,7 @@ uninstall_driver() {
 print_banner() {
     cat <<'EOF'
 ╔═══════════════════════════════════════════════════════════════════════╗
-║                    MycoWave v2.1.0                                    ║
+║                    MycoWave v2.2.0                                    ║
 ║       Alpha AWUS036ACH Driver Installer for Kali Linux              ║
 ╠═══════════════════════════════════════════════════════════════════════╣
 ║  Smart installer supporting:                                        ║
@@ -1010,7 +1218,8 @@ Options:
   --thermal              Enable thermal monitoring service
   --coex                 Configure Bluetooth coexistence
   --skip-crash-collector Skip crash dump collector installation
-  --test                 Run comprehensive test suite after install
+  --test                 Run comprehensive test suite after install (implies --skip-verify)
+  --remove-mok           Also delete MOK keys on --uninstall (UEFI enrollment remains regardless)
   --help, -h             Show this help
 
 Examples:
@@ -1033,10 +1242,10 @@ parse_args() {
             --dry-run) DRY_RUN=true ;;
             --verbose|-v) VERBOSE=true ;;
             --uninstall) UNINSTALL=true ;;
-            --force-method) FORCE_METHOD="$2"; shift ;;
+            --force-method) [[ $# -lt 2 ]] && { error "--force-method requires an argument (inkernel|kali-dkms|ac3rn|aircrack-ng)"; usage; exit 1; }; FORCE_METHOD="$2"; shift ;;
             --skip-verify) SKIP_VERIFY=true ;;
             --skip-monitor) SKIP_MONITOR_SETUP=true ;;
-            --reg-domain) REG_DOMAIN="$2"; shift ;;
+            --reg-domain) [[ $# -lt 2 ]] && { error "--reg-domain requires an argument (e.g. BO, US)"; usage; exit 1; }; REG_DOMAIN="$2"; shift ;;
             --performance) ENABLE_PERFORMANCE=true ;;
             --skip-firmware) SKIP_FIRMWARE_UPDATE=true ;;
             --secure-boot) ENABLE_SECURE_BOOT=true ;;
@@ -1045,7 +1254,8 @@ parse_args() {
             --thermal) ENABLE_THERMAL=true ;;
             --coex) ENABLE_COEX=true ;;
             --skip-crash-collector) SKIP_CRASH_COLLECTOR=true ;;
-            --test) RUN_TEST_SUITE=true ;;
+            --test) RUN_TEST_SUITE=true; SKIP_VERIFY=true ;;
+            --remove-mok) REMOVE_MOK_KEYS=true ;;
             --help|-h) usage; exit 0 ;;
             *) error "Unknown option: $1"; usage; exit 1 ;;
         esac
@@ -1056,7 +1266,9 @@ parse_args() {
 main() {
     parse_args "$@"
 
-    # Initialize log
+    # Initialize log directory/file FIRST (before any log/info/warn call).
+    # Gated by run() so --dry-run changes nothing; log helpers skip file
+    # appends in DRY_RUN mode so this ordering is always safe.
     run "mkdir -p /var/log"
     run "touch '$LOG_FILE'"
     run "chmod 644 '$LOG_FILE'"
@@ -1071,12 +1283,25 @@ main() {
     detect_kali_version
     detect_driver_conflicts
 
+    # Surface detection results (otherwise these would be unused variables).
+    info "Kali version: ${KALI_MAJOR}.${KALI_MINOR} (OS: $OS_ID $OS_VERSION)"
+    info "Secure Boot state: $SECURE_BOOT_STATE"
+    if [[ "$CONFLICT_DETECTED" == true ]]; then
+        warn "Conflicting drivers are currently loaded — the installer will blacklist the unused one; reboot after install."
+    else
+        verbose "No driver conflict detected"
+    fi
+
     if [[ "$UNINSTALL" == true ]]; then
         uninstall_driver
         exit 0
     fi
 
     check_prerequisites
+
+    # Secure Boot PRE step (MOK key generation) must run BEFORE the DKMS install.
+    setup_secure_boot
+
     choose_strategy
 
     # Execute chosen strategy
@@ -1088,9 +1313,11 @@ main() {
         *) error "Unknown strategy: $STRATEGY"; exit 1 ;;
     esac
 
+    # Secure Boot POST step: sign the freshly built DKMS modules.
+    setup_secure_boot_post
+
     setup_performance_config
     update_firmware
-    setup_secure_boot
     setup_pi_optimizations
     setup_watchdog
     setup_thermal
@@ -1098,6 +1325,12 @@ main() {
     setup_crash_collector
     setup_monitor_mode
     setup_dkms_autorebuild
+
+    # --test implies SKIP_VERIFY (set in parse_args); belt-and-braces here too.
+    if [[ "$RUN_TEST_SUITE" == true ]]; then
+        SKIP_VERIFY=true
+        info "--test requested: skipping smoke verification in favor of full suite"
+    fi
     verify_install
 
     # Run comprehensive test suite if requested

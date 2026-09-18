@@ -8,7 +8,7 @@ The `--performance` flag applies a comprehensive set of optimizations for the AW
 
 ## Applied Optimizations
 
-### Module Parameters (`/etc/modprobe.d/mycowave-performance.conf`)
+### Module Parameters (`/etc/modprobe.d/awus036ach-performance.conf`)
 
 ```ini
 # Force USB 2.0 mode (stability > speed for RTL8812AU chipset)
@@ -29,8 +29,11 @@ options <driver> rtw_country_code=BO
 ```
 
 Where `<driver>` is:
-- `88XXau` for DKMS drivers (kali-dkms, ac3rn, aircrack-ng)
-- `rtw88_8812au` for in-kernel driver (inkernel)
+- `88XXau` for DKMS drivers (kali-dkms, ac3rn, aircrack-ng) — the `rtw_*`
+  options below are DKMS-only and must NOT be applied to `rtw88` modules.
+- In-kernel (`inkernel`) uses only `rtw88_*` options (e.g. `rtw88_core`
+  `debug_mask`, `disable_lps_deep_mode`); DKMS-only opts are invalid there.
+  The installer writes per-driver configs accordingly.
 
 ---
 
@@ -172,8 +175,8 @@ iw dev wlan0 get txpower
 ## Manual Application
 
 ```bash
-# Create performance config
-sudo tee /etc/modprobe.d/mycowave-performance.conf <<'EOF'
+# Create performance config (DKMS driver only — these rtw_* opts are invalid for rtw88)
+sudo tee /etc/modprobe.d/awus036ach-performance.conf <<'EOF'
 # MycoWave Performance Optimizations
 options 88XXau rtw_switch_usb_mode=2
 options 88XXau rtw_ips_mode=0 rtw_lps_level=0
@@ -183,11 +186,10 @@ options 88XXau rtw_monitor_retransmit=1
 options 88XXau rtw_country_code=BO
 EOF
 
-# For in-kernel
-sudo tee -a /etc/modprobe.d/mycowave-performance.conf <<'EOF'
-options rtw88_8812au rtw_switch_usb_mode=2
-options rtw88_8812au rtw_lps_level=0
+# For in-kernel (rtw88-only options; DKMS opts like rtw_switch_usb_mode are invalid here)
+sudo tee /etc/modprobe.d/awus036ach-performance.conf <<'EOF'
 options rtw88_core debug_mask=0x0
+options rtw88_core disable_lps_deep_mode=Y
 EOF
 
 # Reload driver
