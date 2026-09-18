@@ -273,8 +273,11 @@ check_prerequisites() {
             if dpkg-query -W -f='${Status}' "$headers_meta" 2>/dev/null | grep -q "ok installed"; then
                 warn "$headers_exact not installed but $headers_meta is present — continuing (DKMS may still build)."
             else
-                warn "$headers_exact missing; will try installing it (warn-only if unavailable for this Kali kernel)."
+                warn "$headers_exact missing; will try exact + meta headers (warn-only if unavailable)."
                 missing+=("$headers_exact")
+                # Meta package pulls headers for the running Kali kernel when the
+                # exact versioned package is not published.
+                missing+=("linux-headers-amd64")
             fi
         fi
     fi
@@ -291,7 +294,12 @@ check_prerequisites() {
         if [[ "$DRY_RUN" == true ]]; then
             verbose "→ apt-get install -y ${missing[*]}"
         else
-            apt-get install -y "${missing[@]}" || warn "Some packages failed to install — continuing anyway."
+            # Install one-by-one: a single unknown package name must not abort
+            # the whole apt transaction (which would skip dkms/libelf-dev too).
+            local pkg
+            for pkg in "${missing[@]}"; do
+                apt-get install -y "$pkg" || warn "Failed to install '$pkg' — continuing."
+            done
         fi
     fi
     success "Prerequisites satisfied"
@@ -354,10 +362,29 @@ install_ac3rn() {
 
     local repo="https://github.com/Ac3rN/realtek-rtl88xxau-auto-installer.git"
     local dir="/tmp/realtek-rtl88xxau-auto-installer"
+    # Upstream entrypoint is install_alfa_driver.sh (NOT install.sh).
+    local entry="$dir/install_alfa_driver.sh"
 
     run "rm -rf '$dir'"
     run "git clone --depth 1 '$repo' '$dir'"
-    run "chmod +x '$dir/install.sh'"
+
+    # Resolve the real entrypoint (upstream file name may change).
+    if [[ "$DRY_RUN" != true ]]; then
+        if [[ ! -f "$entry" ]]; then
+            local found=""
+            found=$(find "$dir" -maxdepth 1 -type f -name '*install*.sh' -print -quit 2>/dev/null || true)
+            if [[ -z "$found" ]]; then
+                error "Ac3rN entrypoint not found in $dir (expected install_alfa_driver.sh)."
+                error "Upstream layout changed or clone failed. Alternatives:"
+                error "  sudo $SCRIPT_NAME --force-method inkernel     # managed rtw88 (recommended)"
+                error "  sudo $SCRIPT_NAME --force-method aircrack-ng  # injection"
+                run "rm -rf '$dir'"
+                return 1
+            fi
+            entry="$found"
+        fi
+    fi
+    run "chmod +x '$entry'"
 
     # Blacklist in-kernel driver (single write = idempotent)
     dry_write /etc/modprobe.d/blacklist-rtw88.conf <<'EOF'
@@ -369,7 +396,7 @@ EOF
     run "rm -f /etc/modprobe.d/blacklist-rtl88xxau.conf"
     run "update-initramfs -u"
 
-    run "'$dir/install.sh'"
+    run "bash '$entry'"
 
     run "modprobe 88XXau"
     sleep 2
