@@ -31,9 +31,9 @@ options <driver> rtw_country_code=BO
 Where `<driver>` is:
 - `88XXau` for DKMS drivers (kali-dkms, ac3rn, aircrack-ng) — the `rtw_*`
   options below are DKMS-only and must NOT be applied to `rtw88` modules.
-- In-kernel (`inkernel`) uses only `rtw88_*` options (e.g. `rtw88_core`
-  `debug_mask`, `disable_lps_deep_mode`); DKMS-only opts are invalid there.
-  The installer writes per-driver configs accordingly.
+- In-kernel (`inkernel`) **and** the `lwfinger` backport use only `rtw88_*`
+  options (e.g. `rtw88_core` `debug_mask`, `disable_lps_deep_mode`); DKMS-only
+  opts are invalid there. The installer writes per-driver configs accordingly.
 
 ---
 
@@ -112,16 +112,21 @@ iw reg set BO
 
 ---
 
-## In-Kernel rtw88 Additions
+## In-Kernel / lwfinger rtw88 Additions
 
-When using `inkernel` strategy, additional parameters applied:
+When using the `inkernel` or `lwfinger` strategy, additional parameters applied:
 
 ```ini
-# rtw88 (in-kernel) specific options
-options rtw88_8812au rtw_switch_usb_mode=2
-options rtw88_8812au rtw_lps_level=0
+# rtw88 (in-kernel / lwfinger) specific options — as written by the installer
 options rtw88_core debug_mask=0x0
+options rtw88_core disable_lps_deep_mode=Y
 ```
+
+The installer does **not** apply the DKMS `rtw_*` options
+(`rtw_switch_usb_mode`, `rtw_tx_pwr_idx_override`, `rtw_monitor_*`,
+`rtw_country_code`, `rtw_ips_mode`, `rtw_lps_level`) to `rtw88` modules — they
+are invalid there. Regulatory domain is set via cfg80211 (`iw reg set`), not a
+module option.
 
 ---
 
@@ -136,9 +141,9 @@ cat /sys/module/88XXau/parameters/rtw_lps_level
 cat /sys/module/88XXau/parameters/rtw_tx_pwr_idx_override
 cat /sys/module/88XXau/parameters/rtw_country_code
 
-# For in-kernel driver
-cat /sys/module/rtw88_8812au/parameters/rtw_switch_usb_mode
-cat /sys/module/rtw88_8812au/parameters/rtw_lps_level
+# For in-kernel / lwfinger driver
+cat /sys/module/rtw88_core/parameters/debug_mask
+cat /sys/module/rtw88_core/parameters/disable_lps_deep_mode
 
 # Check regulatory domain
 iw reg get
@@ -154,10 +159,14 @@ iw dev wlan0 get txpower
 | Metric | Before | After (--performance) |
 |--------|--------|----------------------|
 | Monitor mode stability | Drops every few min | Stable for hours |
-| Injection success rate | ~60% | ~95% |
+| Injection success rate | ~60% | ~95% (out-of-tree `88XXau` only) |
 | 5GHz channel availability | Limited by regdom | All channels |
 | TX power | Regdom limited | Max hardware (30 dBm) |
 | USB disconnects | Occasional | Rare |
+
+> The injection/TX-power gains come from the DKMS `88XXau` options. The `inkernel` and
+> `lwfinger` strategies receive only `rtw88_core` options, and their packet injection
+> remains unreliable by design (use `ac3rn`/`kali-dkms`/`aircrack-ng` for injection).
 
 ---
 
@@ -186,7 +195,7 @@ options 88XXau rtw_monitor_retransmit=1
 options 88XXau rtw_country_code=BO
 EOF
 
-# For in-kernel (rtw88-only options; DKMS opts like rtw_switch_usb_mode are invalid here)
+# For in-kernel / lwfinger (rtw88-only options; DKMS opts like rtw_switch_usb_mode are invalid here)
 sudo tee /etc/modprobe.d/awus036ach-performance.conf <<'EOF'
 options rtw88_core debug_mask=0x0
 options rtw88_core disable_lps_deep_mode=Y

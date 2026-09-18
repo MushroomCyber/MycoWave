@@ -6,6 +6,12 @@
 
 set -euo pipefail
 
+# Bookworm+ moved boot firmware config to /boot/firmware
+BOOT_DIR="/boot"
+if [[ -d /boot/firmware ]]; then
+    BOOT_DIR="/boot/firmware"
+fi
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -38,9 +44,9 @@ detect_pi() {
 }
 
 apply_config_txt() {
-    log "Applying /boot/config.txt optimizations..."
+    log "Applying ${BOOT_DIR}/config.txt optimizations..."
 
-    local config="/boot/config.txt"
+    local config="${BOOT_DIR}/config.txt"
     local backup="${config}.mycowave.bak"
 
     [[ -f "$config" ]] || { warn "No $config found"; return 1; }
@@ -77,13 +83,13 @@ apply_config_txt() {
     # This is a kernel cmdline parameter, not config.txt
     info "USB mode forcing handled via kernel cmdline / modprobe.d"
 
-    success "/boot/config.txt updated"
+    success "${config} updated"
 }
 
 apply_cmdline_txt() {
-    log "Applying /boot/cmdline.txt kernel parameters..."
+    log "Applying ${BOOT_DIR}/cmdline.txt kernel parameters..."
 
-    local cmdline="/boot/cmdline.txt"
+    local cmdline="${BOOT_DIR}/cmdline.txt"
     local backup="${cmdline}.mycowave.bak"
 
     [[ -f "$cmdline" ]] || { warn "No $cmdline found"; return 1; }
@@ -108,7 +114,7 @@ apply_cmdline_txt() {
     done
 
     echo "$new_cmdline" > "$cmdline"
-    success "/boot/cmdline.txt updated"
+    success "${cmdline} updated"
 }
 
 set_cpu_governor() {
@@ -161,14 +167,14 @@ create_modprobe_config() {
     cat > /etc/modprobe.d/mycowave-pi.conf <<'EOF'
 # MycoWave - Raspberry Pi / ARM64 Optimizations for RTL8812AU
 # Force USB 2.0 mode (avoids 2.4GHz interference, more stable)
-options 8812au rtw_switch_usb_mode=0
+options 88XXau rtw_switch_usb_mode=0
 options rtw88_8812au rtw_switch_usb_mode=0
 
 # Disable deep power save (prevents disconnects on Pi USB)
-options 8812au rtw_disable_lps_deep=1
+options 88XXau rtw_disable_lps_deep=1
 
 # Thermal protection
-options 8812au rtw_tx_pwr_track=1 rtw_thermal_protect=1
+options 88XXau rtw_tx_pwr_track=1 rtw_thermal_protect=1
 
 # Platform hint for morrownr driver
 # CONFIG_PLATFORM_ARM64_RPI=y is compile-time only
@@ -229,8 +235,8 @@ main() {
         exit 0
     fi
 
-    apply_config_txt
-    apply_cmdline_txt
+    apply_config_txt || warn "Boot config.txt update skipped or failed"
+    apply_cmdline_txt || warn "Boot cmdline.txt update skipped or failed"
     set_cpu_governor
     install_kalipi_headers
     create_modprobe_config

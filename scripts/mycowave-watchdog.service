@@ -6,7 +6,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/wifi-watchdog.sh run
+ExecStart=/usr/local/bin/wifi-watchdog run
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal
@@ -18,8 +18,8 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/sys/class/net /sys/bus/usb/devices /sys/kernel/debug
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_DAC_OVERRIDE
+ReadWritePaths=/sys/class/net /sys/bus/usb/devices /sys/kernel/debug /sys/module /run
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_DAC_OVERRIDE CAP_SYS_MODULE CAP_NET_RAW
 
 [Install]
 WantedBy=multi-user.target

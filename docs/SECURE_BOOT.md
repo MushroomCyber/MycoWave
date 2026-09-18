@@ -49,7 +49,18 @@ On next boot, blue **MOK Manager** screen appears:
 3. Select **Reboot**
 
 ### 4. Module Signing
-All DKMS modules for current kernel are signed with the MOK key.
+MycoWave signs the freshly built DKMS modules for the current kernel with the MOK key.
+Only uncompressed `.ko` modules are signed — `sign-file` cannot sign compressed
+`.ko.zst` files, so those are skipped with a warning (decompress with `unzstd` and
+re-sign, or disable module compression).
+
+It also **persists the signing configuration** so kernel-upgrade DKMS rebuilds are
+signed automatically:
+- Newer DKMS: `/etc/dkms/framework.conf.d/mycowave-signing.conf`
+- Older DKMS: an idempotent MycoWave block appended to `/etc/dkms/framework.conf`
+
+The config sets `mok_signing_key`, `mok_certificate`, and `sign_file`, so
+`dkms autoinstall` signs rebuilt modules without manual intervention.
 
 ---
 
@@ -93,6 +104,7 @@ dkms status --installed | while read line; do
     arch=$(echo "$line" | cut -d',' -f4 | cut -d':' -f1)
 
     if [[ "$kern" == "$(uname -r)" ]]; then
+        # Only .ko is signable; sign-file cannot sign .ko.zst
         for ko in /var/lib/dkms/$name/$version/$kern/$arch/module/*.ko; do
             $SIGN_TOOL sha256 \
                 /var/lib/shim-signed/mok/MOK.priv \
@@ -142,14 +154,19 @@ done
 
 ## After Kernel Update
 
-When kernel updates, DKMS rebuilds modules but they're **unsigned**.
+When the kernel updates, DKMS rebuilds the modules. If MycoWave installed with
+`--secure-boot`, the persisted signing config
+(`/etc/dkms/framework.conf.d/mycowave-signing.conf`, or a block in
+`/etc/dkms/framework.conf`) means **rebuilds are signed automatically**.
 
-Options:
-1. **Re-run enrollment script**: `sudo /usr/local/bin/mycowave-enroll-mok sign`
-2. **Auto-sign via DKMS**: Add to `/usr/src/<module>-<ver>/dkms.conf`:
-   ```bash
-   POST_BUILD="$(dirname $0)/scripts/sign-file sha256 /var/lib/shim-signed/mok/MOK.priv /var/lib/shim-signed/mok/MOK.der $MODULE_FILE"
-   ```
+If a module is still unsigned (e.g. compressed `.ko.zst`, or a DKMS version that
+ignored the config), you can:
+
+1. **Re-run the signing helper**: `sudo /usr/local/bin/mycowave-enroll-mok sign`
+2. **Verify DKMS signing config** is present under `/etc/dkms/framework.conf.d/`
+   or in `/etc/dkms/framework.conf`
+3. **Decompress compressed modules** (`.ko.zst` → `.ko` with `unzstd`) before signing,
+   or disable kernel module compression.
 
 ---
 

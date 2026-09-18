@@ -10,7 +10,7 @@ set -euo pipefail
 MOK_DIR="/var/lib/shim-signed/mok"
 MOK_KEY="${MOK_DIR}/MOK.priv"
 MOK_CERT="${MOK_DIR}/MOK.der"
-MOK_PASSWORD_FILE="${MOK_DIR}/.mok-password"
+MOK_PW_TEMP=""
 
 # Colors
 RED='\033[0;31m'
@@ -23,6 +23,7 @@ log()    { echo -e "${BLUE}[$(date '+%H:%M:%S')]${NC} $*"; }
 info()   { echo -e "${GREEN}[INFO]${NC} $*"; }
 warn()   { echo -e "${YELLOW}[WARN]${NC} $*"; }
 error()  { echo -e "${RED}[ERROR]${NC} $*"; }
+success() { echo -e "${GREEN}[OK]${NC} $*"; }
 
 # ─── Helper Functions ────────────────────────────────────────────────────────
 require_root() {
@@ -89,13 +90,19 @@ enroll_mok() {
         return 0
     fi
 
-    # Generate one-time password for MOK enrollment
-    local mok_password=$(openssl rand -base64 12 | tr -d '=+/')
-    echo "$mok_password" > "$MOK_PASSWORD_FILE"
-    chmod 600 "$MOK_PASSWORD_FILE"
+    # Generate one-time password for MOK enrollment.
+    # Held only in a root-only temp file (removed on exit), never persisted.
+    MOK_PW_TEMP=$(mktemp)
+    chmod 600 "$MOK_PW_TEMP"
+    trap 'rm -f "${MOK_PW_TEMP:-}"' EXIT
+    openssl rand -base64 12 | tr -d '=+/' > "$MOK_PW_TEMP"
+    local mok_password
+    mok_password=$(cat "$MOK_PW_TEMP")
 
-    info "MOK enrollment password: $mok_password"
-    warn "SAVE THIS PASSWORD - you'll need it on next reboot!"
+    echo ""
+    echo "MOK enrollment password: $mok_password"
+    echo "SAVE THIS PASSWORD - you'll need it on next reboot!"
+    echo ""
 
     # Enroll with password via pipe
     echo -e "$mok_password\n$mok_password" | mokutil --import "$MOK_CERT"
@@ -110,7 +117,7 @@ enroll_mok() {
     warn "  1. Select 'Enroll MOK'"
     warn "  2. Select 'Continue'"
     warn "  3. Select 'Yes' to enroll"
-    warn "  4. Enter password: $mok_password"
+    warn "  4. Enter the password you saved above"
     warn "  5. Select 'Reboot'"
     warn "=============================================="
 }
@@ -135,7 +142,7 @@ sign_dkms_modules() {
 
     # Sign all installed DKMS modules
     local signed=0
-    dkms status --installed 2>/dev/null | while IFS= read -r line; do
+    while IFS= read -r line; do
         # Parse: "modulename, version, kernelver, arch: status"
         local name=$(echo "$line" | cut -d',' -f1 | xargs)
         local version=$(echo "$line" | cut -d',' -f2 | xargs)
@@ -152,11 +159,11 @@ sign_dkms_modules() {
                 [[ -f "$ko" ]] || continue
                 log "Signing: $ko"
                 if "$sign_tool" sha256 "$MOK_KEY" "$MOK_CERT" "$ko" 2>/dev/null; then
-                    ((signed++))
+                    signed=$((signed + 1))
                 fi
             done
         fi
-    done
+    done < <(dkms status --installed 2>/dev/null)
 
     success "Signed $signed module(s) for kernel $kernel_ver"
 }

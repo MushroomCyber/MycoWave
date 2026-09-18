@@ -6,6 +6,9 @@
 
 set -euo pipefail
 
+# Restrict permissions on all collected diagnostic data
+umask 077
+
 # ─── Configuration ──────────────────────────────────────────────────────────
 INTERFACE="${MYCOWAVE_INTERFACE:-wlan0}"
 OUT_BASE_DIR="${MYCOWAVE_CRASH_DIR:-/var/log/mycowave-crashes}"
@@ -29,6 +32,7 @@ create_output_dir() {
     local timestamp=$(date '+%Y%m%d-%H%M%S')
     OUT_DIR="${OUT_BASE_DIR}/${timestamp}"
     mkdir -p "$OUT_DIR"
+    chmod 700 "$OUT_DIR"
     info "Output directory: $OUT_DIR"
 }
 
@@ -152,8 +156,18 @@ collect_driver_specific() {
     # Udev rules
     ls -la /etc/udev/rules.d/ > "$OUT_DIR/udev-rules.txt" 2>/dev/null || true
 
-    # Modprobe configs
-    cat /etc/modprobe.d/*.conf > "$OUT_DIR/modprobe-configs.txt" 2>/dev/null || true
+    # Modprobe configs (MycoWave/driver-relevant only - avoid capturing
+    # unrelated system configuration)
+    {
+        for f in /etc/modprobe.d/mycowave-*.conf \
+                 /etc/modprobe.d/*8812au*.conf \
+                 /etc/modprobe.d/*88XXau*.conf \
+                 /etc/modprobe.d/*rtw88*.conf; do
+            [[ -f "$f" ]] || continue
+            echo "### $f ###"
+            cat "$f"
+        done
+    } > "$OUT_DIR/modprobe-configs.txt" 2>/dev/null || true
 
     # Systemd services
     systemctl list-units --type=service --state=active | grep -iE "mycowave|wifi|network|dkms" > "$OUT_DIR/systemd-services.txt" 2>/dev/null || true
@@ -253,6 +267,10 @@ EOF
 
 compress_output() {
     log "Compressing output..."
+
+    # Ensure collected dump files are root-only
+    find "$OUT_DIR" -type f -exec chmod 600 {} + 2>/dev/null || true
+
     local archive="${OUT_DIR}.tar.gz"
     tar -czf "$archive" -C "$OUT_BASE_DIR" "$(basename "$OUT_DIR")" 2>/dev/null
     success "Compressed archive: $archive"

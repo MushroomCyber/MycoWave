@@ -30,6 +30,15 @@ success() { logger -t "$LOG_TAG" "$*"; echo -e "${GREEN}[OK]${NC} $*"; }
 # ─── State ──────────────────────────────────────────────────────────────────
 THROTTLED=false
 CRITICAL_ACTION=false
+SENSOR_SOURCE="none"
+
+# ARM/Raspberry Pi detection (CPU thermal zone fallback is only valid there)
+is_arm() {
+    case "$(uname -m)" in
+        aarch64|armv7l|armv6l|arm) return 0 ;;
+    esac
+    [[ -f /proc/device-tree/model ]]
+}
 
 # ─── Thermal Reading ────────────────────────────────────────────────────────
 read_rtw88_thermal() {
@@ -85,21 +94,33 @@ read_pi_cpu_thermal() {
 get_max_thermal() {
     local max_temp=0
     local temp=""
+    SENSOR_SOURCE="none"
 
     # Try rtw88 first (in-kernel)
     if temp=$(read_rtw88_thermal); then
         max_temp=$temp
+        SENSOR_SOURCE="rtw88 debugfs"
     fi
 
     # Try 8812au (DKMS)
     if temp=$(read_8812au_thermal); then
-        [[ $temp -gt $max_temp ]] && max_temp=$temp
+        if [[ $temp -gt $max_temp ]]; then
+            max_temp=$temp
+            SENSOR_SOURCE="8812au module param"
+        fi
     fi
 
-    # Fallback to CPU temp (Pi)
+    # CPU thermal zone fallback is only meaningful on ARM/Raspberry Pi.
+    # On x86 the CPU/ACPI zone is not the WiFi adapter, so never throttle
+    # WiFi TX based on it.
     if [[ $max_temp -eq 0 ]]; then
-        if temp=$(read_pi_cpu_thermal); then
-            max_temp=$temp
+        if is_arm; then
+            if temp=$(read_pi_cpu_thermal); then
+                max_temp=$temp
+                SENSOR_SOURCE="cpu-thermal (ARM/Pi)"
+            fi
+        else
+            SENSOR_SOURCE="none"
         fi
     fi
 
@@ -174,12 +195,16 @@ run_monitor() {
 
         local temp=$(get_max_thermal)
 
-        if [[ -z "$temp" || "$temp" -eq 0 ]]; then
-            warn "Could not read thermal sensor"
+        if [[ "$SENSOR_SOURCE" == "none" || -z "$temp" || "$temp" -eq 0 ]]; then
+            if is_arm; then
+                warn "Could not read thermal sensor"
+            else
+                warn "No WiFi thermal sensor; not throttling"
+            fi
             continue
         fi
 
-        log "Current temperature: ${temp}°C"
+        log "Current temperature: ${temp}°C (source: ${SENSOR_SOURCE})"
 
         # State machine
         if [[ "$CRITICAL_ACTION" == true ]]; then
@@ -206,12 +231,16 @@ run_monitor() {
 run_once() {
     local temp=$(get_max_thermal)
 
-    if [[ -z "$temp" || "$temp" -eq 0 ]]; then
-        error "Could not read thermal sensor"
+    if [[ "$SENSOR_SOURCE" == "none" || -z "$temp" || "$temp" -eq 0 ]]; then
+        if is_arm; then
+            error "Could not read thermal sensor"
+        else
+            error "No WiFi thermal sensor; not throttling"
+        fi
         exit 1
     fi
 
-    info "Temperature: ${temp}°C"
+    info "Temperature: ${temp}°C (source: ${SENSOR_SOURCE})"
 
     if [[ $temp -ge $THERMAL_CRITICAL ]]; then
         warn "CRITICAL: ${temp}°C >= ${THERMAL_CRITICAL}°C"
@@ -238,7 +267,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/thermal-monitor.sh run
+ExecStart=/usr/local/bin/thermal-monitor run
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal
@@ -257,7 +286,7 @@ PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
 ReadWritePaths=/sys/class/net /sys/kernel/debug
-CapabilityBoundingSet=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
 
 [Install]
 WantedBy=multi-user.target
@@ -312,8 +341,8 @@ main() {
             ;;
         status)
             local temp=$(get_max_thermal)
-            if [[ -n "$temp" && "$temp" -gt 0 ]]; then
-                info "Current temperature: ${temp}°C"
+            if [[ "$SENSOR_SOURCE" != "none" && -n "$temp" && "$temp" -gt 0 ]]; then
+                info "Current temperature: ${temp}°C (source: ${SENSOR_SOURCE})"
                 info "Throttle threshold: ${THERMAL_THROTTLE}°C"
                 info "Critical threshold: ${THERMAL_CRITICAL}°C"
                 info "Recovery threshold: ${THERMAL_RECOVER}°C"
@@ -325,8 +354,10 @@ main() {
                 else
                     success "STATE: NORMAL"
                 fi
-            else
+            elif is_arm; then
                 error "Could not read thermal sensor"
+            else
+                info "No WiFi thermal sensor; not throttling"
             fi
             ;;
         help|--help|-h)

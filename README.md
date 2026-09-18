@@ -10,7 +10,7 @@
 
 ## Overview
 
-MycoWave is a version-aware, zero-intervention installer for the **Alpha AWUS036ACH** (RTL8812AU/RTL8821AU chipset) on Kali Linux. It automatically detects your kernel version, architecture, and Secure Boot state, then selects the optimal driver strategy — from in-kernel `rtw88` (Linux 6.14+) to patched DKMS builds for older kernels.
+MycoWave is a version-aware, zero-intervention installer for the **Alpha AWUS036ACH** (RTL8812AU/RTL8821AU chipset) on Kali Linux. It automatically detects your kernel version, architecture, and Secure Boot state, then selects the optimal driver strategy from five disjoint ranges — the `lwfinger/rtw88` backport on kernels `< 6.6`, in-kernel `rtw88` on 6.14, and patched DKMS builds on newer kernels. `aircrack-ng` source remains available on demand for injection workloads.
 
 **No more manual `make`, `dkms`, or `airmon-ng` fiddling.** Plug in the adapter, run MycoWave, and you're capturing packets.
 
@@ -20,21 +20,22 @@ MycoWave is a version-aware, zero-intervention installer for the **Alpha AWUS036
 
 | Feature | Description |
 |---------|-------------|
-| **Auto-detection** | Kernel (6.6–6.18+), arch (x86_64/ARM64), Secure Boot, Kali version |
-| **Smart strategy selection** | Ac3rN patched ≥ 6.15 (incl. 6.19+), in-kernel `rtw88` on 6.14, Kali DKMS 6.6–6.13, aircrack-ng source < 6.6 |
+| **Auto-detection** | Kernel (6.6–7.x), arch (x86_64/ARM64), Secure Boot, Kali version |
+| **Smart strategy selection** | Disjoint ranges: `lwfinger` < 6.6, Kali DKMS 6.6–6.13, in-kernel `rtw88` on 6.14, Ac3rN 6.15–6.18, Ac3rN (experimental) ≥ 6.19 |
+| **Managed vs injection** | Out-of-tree `88XXau` (ac3rn/kali-dkms/aircrack-ng) for reliable injection; in-kernel `rtw88`/`lwfinger` for managed use |
 | **Driver conflict resolution** | Auto-blacklists competing drivers (DKMS vs in-kernel) |
 | **Monitor mode automation** | udev rules + NetworkManager dispatcher + systemd service |
 | **Performance optimizations** | `--performance` flag: USB2 force, powersave disable, TX power max, 5GHz unlock |
 | **Firmware updates** | Auto-copies latest `rtw88xx_fw.bin` from `linux-firmware` |
 | **DKMS auto-rebuild** | Initramfs hook + systemd service for kernel upgrades |
 | **Post-install verification** | Module load, monitor mode, injection capability, 5GHz channels |
-| **Comprehensive test suite** | `--test` flag: 20+ checks (driver, monitor, injection, 5GHz, VHT/HT, USB, services) |
-| **Clean uninstall** | `--uninstall` removes everything including configs |
+| **Comprehensive test suite** | `--test` flag: 20 checks incl. a real `aireplay-ng -9` injection test, ending with a `managed: ... \| injection: OK\|FAILED\|SKIPPED` summary |
+| **Clean uninstall** | `--uninstall` is manifest-driven (`/var/lib/mycowave/installed.files`) — removes only MycoWave-created files; `--remove-mok` also deletes MOK keys |
 | **ARM64/Pi support** | Auto-installs `kalipi-kernel-headers`, USB power tweaks |
-| **Secure Boot (MOK)** | `--secure-boot`: key gen, UEFI enrollment, DKMS signing |
+| **Secure Boot (MOK)** | `--secure-boot`: key gen, UEFI enrollment, DKMS signing (signing config persisted for kernel-upgrade rebuilds) |
 | **Self-healing watchdog** | `--watchdog`: health checks, USB reset, driver reload, crash detection |
 | **Thermal monitoring** | `--thermal`: TX power throttling at 80°C, critical at 95°C |
-| **Bluetooth coexistence** | `--coex`: auto-detects internal BT, configures rtw88 coex |
+| **Bluetooth coexistence** | `--coex`: auto-detects internal BT and writes an active `rtw88_core rtw_btcoex_enable=<0\|1>` line for `inkernel`/`lwfinger` |
 | **Crash dump collector** | Auto-installs hourly diagnostic collection (kernel logs, debugfs, USB, etc.) |
 
 ---
@@ -55,6 +56,9 @@ sudo ./mycowave-install.sh --performance
 
 # Preview what would happen
 sudo ./mycowave-install.sh --dry-run
+
+# Force a specific strategy (e.g. managed-mode rtw88 backport)
+sudo ./mycowave-install.sh --force-method lwfinger
 ```
 
 After install, just **plug in the AWUS036ACH** — monitor mode starts automatically on `wlan0mon`.
@@ -65,16 +69,30 @@ After install, just **plug in the AWUS036ACH** — monitor mode starts automatic
 
 | Kernel Version | Strategy | Driver |
 |----------------|----------|--------|
-| **≥ 6.19** | `ac3rn` | Ac3rN patched DKMS (ccflags-y/radio_idx/timer pattern, Kenji776/shchuchkin) |
-| **6.15 – 6.18** | `ac3rn` | Ac3rN patched DKMS (fixes timer/cfg80211 API) |
+| **≥ 6.19** | `ac3rn` ⚠️ | Ac3rN patched DKMS — **experimental / unmaintained**. Upstream Ac3rN targets only 6.15/6.16/6.18; Kenji776's 6.19 fork is a tiny unguarded patch repo and no maintained out-of-tree driver supports 7.x. For managed use prefer `--force-method inkernel` |
+| **6.15 – 6.18** | `ac3rn` | Ac3rN patched DKMS (ccflags-y/radio_idx/timer, fixes timer/cfg80211 API) |
 | **6.14** | `inkernel` | In-kernel `rtw_8812au` (mac80211) |
-| **6.6 – 6.13** | `kali-dkms` | Kali `realtek-rtl88xxau-dkms` package |
-| **< 6.6** | `aircrack-ng` | aircrack-ng/rtl8812au source (see also lwfinger/rtw88 backport) |
+| **6.6 – 6.13** | `kali-dkms` | Kali `realtek-rtl88xxau-dkms` package (frozen at 2025-03-30; hard-gated to ≤ 6.13) |
+| **< 6.6** | `lwfinger` | `lwfinger/rtw88` DKMS backport (managed mode; injection NOT guaranteed) |
+
+`aircrack-ng` is **no longer the automatic `< 6.6` default** — it remains available for
+injection workloads via `--force-method aircrack-ng`. Forcing `kali-dkms` on a kernel
+`> 6.13` is refused, because the frozen Kali package does not build on 6.15+.
 
 Force a specific method:
 ```bash
 sudo ./mycowave-install.sh --force-method ac3rn
+sudo ./mycowave-install.sh --force-method lwfinger  # managed-mode rtw88 backport
 ```
+
+### Managed mode vs injection
+
+The in-kernel `rtw88` stack (and the `lwfinger/rtw88` backport) works well in **managed
+mode**, but **packet injection is unreliable** — see upstream issues
+[#424](https://github.com/lwfinger/rtw88/issues/424)/[#428](https://github.com/lwfinger/rtw88/issues/428)/[#453](https://github.com/lwfinger/rtw88/issues/453)
+and a channel-pinning regression on kernels ≥ 6.9. For dependable `airodump-ng` /
+`aireplay-ng` captures, use an out-of-tree `88XXau` strategy (`ac3rn`, `kali-dkms`, or
+`aircrack-ng`).
 
 ---
 
@@ -86,8 +104,9 @@ sudo ./mycowave-install.sh [OPTIONS]
 Options:
   --dry-run              Show what would be done without making changes
   --verbose, -v          Verbose output
-  --uninstall            Remove driver and all configuration
-  --force-method METHOD  Force install method: inkernel|kali-dkms|ac3rn|aircrack-ng
+  --uninstall            Remove driver and all configuration (manifest-driven)
+  --force-method METHOD  Force install method: inkernel|lwfinger|kali-dkms|ac3rn|aircrack-ng
+                         (kali-dkms is refused on kernels > 6.13)
   --skip-verify          Skip post-install verification
   --skip-monitor         Skip automatic monitor mode setup
   --reg-domain CODE      Regulatory domain for 5GHz (default: BO)
@@ -99,7 +118,9 @@ Options:
   --thermal              Enable thermal monitoring service
   --coex                 Configure Bluetooth coexistence
   --skip-crash-collector Skip crash dump collector installation
-  --test                 Run comprehensive test suite after install
+  --test                 Run comprehensive test suite after install (includes real
+                         aireplay-ng -9 injection check; implies --skip-verify)
+  --remove-mok           Also delete MOK keys on --uninstall (UEFI enrollment remains)
   --help, -h             Show this help
 ```
 
@@ -166,13 +187,20 @@ sudo aireplay-ng -9 wlan0mon
 iw phy phy0 channels | grep -A1 "5[0-9][0-9][0-9]"
 ```
 
+> On `inkernel`/`lwfinger` (rtw88) the adapter works in managed mode, but injection is
+> unreliable — use an out-of-tree `88XXau` strategy for capture/injection workloads.
+
 ---
 
 ## Uninstall
 
 ```bash
+# Removes only files recorded in /var/lib/mycowave/installed.files
 sudo ./mycowave-install.sh --uninstall
 # Reboot recommended
+
+# Also delete the MOK key pair (UEFI enrollment still remains)
+sudo ./mycowave-install.sh --uninstall --remove-mok
 ```
 
 ---
@@ -191,7 +219,9 @@ sudo ./mycowave-install.sh --uninstall
 | Issue | Solution |
 |-------|----------|
 | **Module won't load (Secure Boot)** | Run `mokutil --import` with generated MOK key, enroll on reboot |
-| **DKMS build fails on kernel 6.15+** | Use `--force-method ac3rn` |
+| **DKMS build fails on kernel 6.15+** | Use `--force-method ac3rn` (6.15–6.18) or `--force-method lwfinger` (managed) |
+| **`--force-method kali-dkms` refused** | The frozen Kali package only builds ≤ 6.13; use `ac3rn`/`lwfinger` instead |
+| **`rtw88` injection unreliable** | Expected: use an out-of-tree `88XXau` strategy (`ac3rn`/`kali-dkms`/`aircrack-ng`) |
 | **Monitor mode fails** | Run `sudo airmon-ng check kill` first |
 | **No 5GHz channels** | `sudo iw reg set BO` (or your country code) |
 | **ARM64/Pi build fails** | Ensure `kalipi-kernel-headers` installed |

@@ -12,6 +12,8 @@ set -euo pipefail
 SCRIPT_VERSION="2.2.0"
 SCRIPT_NAME="mycowave-install"
 LOG_FILE="/var/log/${SCRIPT_NAME}.log"
+MANIFEST_DIR="/var/lib/mycowave"
+MANIFEST_FILE="$MANIFEST_DIR/installed.files"
 DRY_RUN=false
 VERBOSE=false
 UNINSTALL=false
@@ -56,6 +58,25 @@ error()   { _log_emit "${RED}[ERROR]${NC} $*"; }
 success() { _log_emit "${GREEN}[OK]${NC} $*"; }
 verbose() { [[ "$VERBOSE" == true ]] && log "$*" || true; }
 run()     { verbose "→ $*"; [[ "$DRY_RUN" == true ]] || eval "$*"; }
+# Artifact manifest: only files MycoWave itself creates are recorded, so
+# --uninstall never deletes package-owned files (e.g. /etc/default/crda or
+# linux-firmware blobs under /lib/firmware/rtlwifi/).
+manifest_add() {
+    local path="$1"
+    [[ -n "$path" ]] || return 0
+    if [[ "$DRY_RUN" == true ]]; then
+        info "[dry-run] would record $path in $MANIFEST_FILE"
+        return 0
+    fi
+    mkdir -p "$MANIFEST_DIR"
+    grep -qxF "$path" "$MANIFEST_FILE" 2>/dev/null || printf '%s\n' "$path" >> "$MANIFEST_FILE"
+}
+
+manifest_has() {
+    local path="$1"
+    [[ -f "$MANIFEST_FILE" ]] && grep -qxF "$path" "$MANIFEST_FILE" 2>/dev/null
+}
+
 # Centralized file writer: respects DRY_RUN. Usage: dry_write DEST <<EOF ... EOF
 dry_write() {
     local dest="$1"
@@ -66,6 +87,7 @@ dry_write() {
     fi
     mkdir -p "$(dirname "$dest")"
     cat > "$dest"
+    manifest_add "$dest"
 }
 
 # ─── Utility Functions ──────────────────────────────────────────────────────
@@ -146,17 +168,41 @@ detect_driver_conflicts() {
 choose_strategy() {
     if [[ -n "$FORCE_METHOD" ]]; then
         STRATEGY="$FORCE_METHOD"
+        case "$STRATEGY" in
+            inkernel|lwfinger|ac3rn|aircrack-ng)
+                ;;
+            kali-dkms)
+                # The Kali package is frozen at 2025-03-30 and fails to build on 6.15+.
+                if (( KERNEL_MAJOR > 6 || (KERNEL_MAJOR == 6 && KERNEL_MINOR > 13) )); then
+                    error "--force-method kali-dkms refused on kernel $KERNEL_VERSION (> 6.13)."
+                    error "The Kali realtek-rtl88xxau-dkms package is frozen at 2025-03-30 and does not build on 6.15+."
+                    error "Use --force-method ac3rn (6.15-6.18) or --force-method lwfinger (managed) instead."
+                    exit 1
+                fi
+                ;;
+            *)
+                error "Unknown forced method: $STRATEGY"
+                error "Valid methods: inkernel|lwfinger|kali-dkms|ac3rn|aircrack-ng"
+                usage
+                exit 1
+                ;;
+        esac
         info "Forced strategy: $STRATEGY"
         return
     fi
 
-    # Disjoint ranges — check highest first so ac3rn stays reachable
-    # (a broad >= 6.14 check placed first would shadow every branch below).
-    # Kernel >= 6.19 → Ac3rN patched DKMS (DKMS API breaks persist past 6.18;
-    # follows the Kenji776/shchuchkin pattern: ccflags-y, radio_idx, timer API).
+    # Disjoint ranges — check highest first so lower branches are not shadowed.
+    # Kernel >= 6.19 / 7.x: no maintained out-of-tree driver supports these.
     if (( KERNEL_MAJOR > 6 || (KERNEL_MAJOR == 6 && KERNEL_MINOR >= 19) )); then
         STRATEGY="ac3rn"
-        info "Kernel $KERNEL_VERSION ≥ 6.19 → using Ac3rN patched DKMS (ccflags-y/radio_idx/timer fixes)"
+        warn "════════════════════════════════════════════════════════════════"
+        warn "  UNMAINTAINED PATH: kernel $KERNEL_VERSION ≥ 6.19"
+        warn "  Upstream Ac3rN targets only 6.16/6.18. Kenji776's 6.19 fork"
+        warn "  is a tiny unguarded patch repo, and NO maintained out-of-tree"
+        warn "  rtl8812au driver supports 7.x. Proceeding with ac3rn anyway."
+        warn "  For managed (non-injection) use prefer in-kernel rtw88:"
+        warn "      sudo $SCRIPT_NAME --force-method inkernel"
+        warn "════════════════════════════════════════════════════════════════"
         return
     fi
 
@@ -174,18 +220,18 @@ choose_strategy() {
         return
     fi
 
-    # Kernel 6.6 - 6.13 → Kali DKMS package
+    # Kernel 6.6 - 6.13 → Kali DKMS package (frozen at 2025-03-30; safe on these kernels)
     if (( KERNEL_MAJOR == 6 && KERNEL_MINOR >= 6 && KERNEL_MINOR <= 13 )); then
         STRATEGY="kali-dkms"
         info "Kernel $KERNEL_VERSION (6.6-6.13) → using Kali DKMS package"
         return
     fi
 
-    # Older kernels → direct from aircrack-ng source.
-    # NOTE: aircrack-ng/rtl8812au is deprecated upstream ("use mac80211 drivers");
-    # for a maintained backport path see lwfinger/rtw88.
-    STRATEGY="aircrack-ng"
-    info "Kernel $KERNEL_VERSION < 6.6 → using aircrack-ng source (see also lwfinger/rtw88 backport)"
+    # Older kernels (< 6.6) → lwfinger/rtw88 managed backport (default).
+    # aircrack-ng remains reachable via --force-method aircrack-ng for injection work.
+    STRATEGY="lwfinger"
+    info "Kernel $KERNEL_VERSION < 6.6 → using lwfinger/rtw88 backport (managed mode; injection NOT guaranteed)"
+    info "For injection workloads use: sudo $SCRIPT_NAME --force-method aircrack-ng"
 }
 
 # ─── Pre-Install Checks ─────────────────────────────────────────────────────
@@ -270,8 +316,10 @@ EOF
     run "modprobe rtw_8812au"
     sleep 2
 
-    # Verify
-    lsmod | grep -q '^rtw_8812au' || { error "rtw_8812au failed to load"; return 1; }
+    # Verify (skipped in dry-run: module load is simulated)
+    if [[ "$DRY_RUN" != true ]]; then
+        lsmod | grep -q '^rtw_8812au' || { error "rtw_8812au failed to load"; return 1; }
+    fi
     success "In-kernel rtw_8812au loaded"
 }
 
@@ -287,12 +335,17 @@ blacklist rtw_8812au
 blacklist rtw_8821au
 blacklist rtw_8814au
 EOF
+    # Clear the blacklist created by install_inkernel so the DKMS module can load
+    run "rm -f /etc/modprobe.d/blacklist-rtl88xxau.conf"
     run "update-initramfs -u"
 
     run "modprobe 88XXau"
     sleep 2
 
-    lsmod | grep -q '^88XXau' || { error "88XXau failed to load"; return 1; }
+    # Verify (skipped in dry-run: module load is simulated)
+    if [[ "$DRY_RUN" != true ]]; then
+        lsmod | grep -q '^88XXau' || { error "88XXau failed to load"; return 1; }
+    fi
     success "Kali DKMS driver loaded"
 }
 
@@ -312,6 +365,8 @@ blacklist rtw_8812au
 blacklist rtw_8821au
 blacklist rtw_8814au
 EOF
+    # Clear the blacklist created by install_inkernel so the DKMS module can load
+    run "rm -f /etc/modprobe.d/blacklist-rtl88xxau.conf"
     run "update-initramfs -u"
 
     run "'$dir/install.sh'"
@@ -319,7 +374,10 @@ EOF
     run "modprobe 88XXau"
     sleep 2
 
-    lsmod | grep -q '^88XXau' || { error "88XXau failed to load after Ac3rN install"; return 1; }
+    # Verify (skipped in dry-run: module load is simulated)
+    if [[ "$DRY_RUN" != true ]]; then
+        lsmod | grep -q '^88XXau' || { error "88XXau failed to load after Ac3rN install"; return 1; }
+    fi
     success "Ac3rN patched DKMS driver loaded"
 }
 
@@ -339,6 +397,8 @@ blacklist rtw_8812au
 blacklist rtw_8821au
 blacklist rtw_8814au
 EOF
+    # Clear the blacklist created by install_inkernel so the DKMS module can load
+    run "rm -f /etc/modprobe.d/blacklist-rtl88xxau.conf"
     run "update-initramfs -u"
 
     # Use DKMS install if available, else manual
@@ -351,8 +411,51 @@ EOF
     run "modprobe 88XXau"
     sleep 2
 
-    lsmod | grep -q '^88XXau' || { error "88XXau failed to load"; return 1; }
+    # Verify (skipped in dry-run: module load is simulated)
+    if [[ "$DRY_RUN" != true ]]; then
+        lsmod | grep -q '^88XXau' || { error "88XXau failed to load"; return 1; }
+    fi
     success "aircrack-ng DKMS driver loaded"
+}
+
+install_lwfinger() {
+    log "Installing: lwfinger/rtw88 backport (managed mode; injection NOT guaranteed)"
+
+    local repo="https://github.com/lwfinger/rtw88.git"
+    local dir="/tmp/rtw88"
+
+    run "rm -rf '$dir'"
+    run "git clone --depth 1 '$repo' '$dir'"
+
+    # Repo ships CRLF dkms.conf — normalize before dkms reads it.
+    run "sed -i 's/\r\$//' '$dir/dkms.conf'"
+
+    # Build + register the rtw88 DKMS module.
+    run "cd '$dir' && dkms install \"\$PWD\""
+    run "make -C '$dir' install_fw"
+
+    # Ship the module options file as-is, then blacklist the opposing DKMS driver.
+    run "cp -f '$dir/rtw88.conf' /etc/modprobe.d/rtw88.conf"
+    manifest_add /etc/modprobe.d/rtw88.conf
+
+    dry_write /etc/modprobe.d/blacklist-rtl88xxau.conf <<'EOF'
+blacklist 88XXau
+blacklist 8812au
+blacklist 8814au
+EOF
+
+    # Ensure rtw88 is not blacklisted (e.g. left over from a prior DKMS install).
+    run "rm -f /etc/modprobe.d/blacklist-rtw88.conf"
+    run "update-initramfs -u"
+
+    run "modprobe rtw88_8812au"
+    sleep 2
+
+    # Verify (skipped in dry-run: module load is simulated)
+    if [[ "$DRY_RUN" != true ]]; then
+        lsmod | grep -q '^rtw_8812au' || { error "rtw88_8812au failed to load"; return 1; }
+    fi
+    success "lwfinger/rtw88 driver loaded (managed mode; injection NOT guaranteed)"
 }
 
 # ─── Performance Configuration ──────────────────────────────────────────────
@@ -364,8 +467,8 @@ setup_performance_config() {
     # Idempotency: remove any previous config so repeated runs never duplicate lines.
     run "rm -f /etc/modprobe.d/awus036ach-performance.conf"
 
-    if [[ "$STRATEGY" == "inkernel" ]]; then
-        # In-kernel rtw88: only rtw88_* options are valid here.
+    if [[ "$STRATEGY" == "inkernel" || "$STRATEGY" == "lwfinger" ]]; then
+        # In-kernel / lwfinger rtw88: only rtw88_* options are valid here.
         # DKMS-only opts (rtw_switch_usb_mode, rtw_tx_pwr_idx_override,
         # rtw_monitor_*, rtw_country_code, rtw_ips_mode) are NOT valid for rtw88.
         dry_write /etc/modprobe.d/awus036ach-performance.conf <<EOF
@@ -437,6 +540,7 @@ update_firmware() {
             fi
             if [[ -f "/lib/firmware/$fw" ]] && ! cmp -s "/lib/firmware/$fw" "$fw_dir/$fw" 2>/dev/null; then
                 run "cp -f '/lib/firmware/$fw' '$fw_dir/'"
+                manifest_add "$fw_dir/$fw"
                 updated=true
                 info "Updated firmware: $fw"
             fi
@@ -452,6 +556,7 @@ update_firmware() {
             fi
             if [[ -f "/usr/lib/firmware/rtlwifi/$fw" ]] && ! cmp -s "/usr/lib/firmware/rtlwifi/$fw" "$fw_dir/$fw" 2>/dev/null; then
                 run "cp -f '/usr/lib/firmware/rtlwifi/$fw' '$fw_dir/'"
+                manifest_add "$fw_dir/$fw"
                 updated=true
                 info "Updated firmware: $fw (from /usr/lib/firmware)"
             fi
@@ -494,6 +599,7 @@ setup_secure_boot() {
     if [[ -f "$script_src" ]]; then
         run "cp '$script_src' '$script_dst'"
         run "chmod +x '$script_dst'"
+        manifest_add "$script_dst"
         success "Installed MOK enrollment script to $script_dst"
     else
         warn "enroll-mok.sh not found at $script_src"
@@ -549,6 +655,15 @@ setup_secure_boot_post() {
     local ko=""
     while IFS= read -r ko; do
         [[ -z "$ko" ]] && continue
+        # sign-file cannot sign compressed modules; skip .ko.zst explicitly.
+        if [[ "$ko" == *.ko.zst ]]; then
+            warn "Skipping compressed module $ko (sign-file cannot sign .ko.zst; decompress with unzstd and re-run, or disable module compression)."
+            continue
+        fi
+        if [[ "$ko" != *.ko ]]; then
+            verbose "Skipping non-.ko artifact: $ko"
+            continue
+        fi
         if [[ "$DRY_RUN" == true ]]; then
             verbose "[dry-run] would sign $ko"
         else
@@ -556,16 +671,56 @@ setup_secure_boot_post() {
                 && { info "Signed: $ko"; signed_any=true; } \
                 || warn "Failed to sign $ko"
         fi
-    done < <(find "/lib/modules/$kver/updates/dkms" -name '88XXau.ko*' 2>/dev/null || true)
+    done < <(find "/lib/modules/$kver/updates/dkms" \( -name '88XXau.ko' -o -name '88XXau.ko.zst' \) 2>/dev/null || true)
 
     if [[ "$signed_any" == true ]]; then
         success "DKMS modules signed with MOK key"
     else
-        warn "No DKMS modules found to sign under /lib/modules/$kver/updates/dkms (or dry-run)."
+        warn "No uncompressed DKMS modules found to sign under /lib/modules/$kver/updates/dkms (or dry-run)."
     fi
 
-    info "DKMS will auto-rebuild on kernel upgrades (dkms autoinstall); re-run this signing step after each rebuild."
+    # Persist DKMS signing config so kernel-upgrade rebuilds are auto-signed.
+    persist_dkms_signing_config "$mok_key" "$mok_cert" "$sign_file"
+
+    info "DKMS will auto-rebuild on kernel upgrades (dkms autoinstall); signing is now configured for future rebuilds."
     info "REBOOT REQUIRED: enroll the MOK key first (sudo mycowave-enroll-mok enroll), then reboot."
+}
+
+# Persist mok_signing_key/mok_certificate/sign_file for DKMS. Newer DKMS reads
+# /etc/dkms/framework.conf.d/*.conf; older versions use /etc/dkms/framework.conf.
+persist_dkms_signing_config() {
+    local mok_key="$1"
+    local mok_cert="$2"
+    local sign_file="$3"
+
+    local conf_block
+    conf_block="# MycoWave signing (managed) - auto-generated for kernel-upgrade rebuilds
+mok_signing_key=\"$mok_key\"
+mok_certificate=\"$mok_cert\"
+sign_file=\"$sign_file\"
+# sign_tool is optional; DKMS defaults to /etc/dkms/sign_helper.sh when unset.
+# End MycoWave signing"
+
+    if [[ -d /etc/dkms/framework.conf.d ]]; then
+        dry_write /etc/dkms/framework.conf.d/mycowave-signing.conf <<EOF
+$conf_block
+EOF
+        success "DKMS signing config written to /etc/dkms/framework.conf.d/mycowave-signing.conf"
+    else
+        info "Creating DKMS signing config in /etc/dkms/framework.conf"
+        if [[ "$DRY_RUN" == true ]]; then
+            info "[dry-run] would append MycoWave signing config to /etc/dkms/framework.conf"
+        else
+            mkdir -p /etc/dkms
+            touch /etc/dkms/framework.conf
+            # Idempotent: drop any previous MycoWave block before appending.
+            sed -i '/^# MycoWave signing (managed)/,/^# End MycoWave signing/d' /etc/dkms/framework.conf 2>/dev/null || true
+            printf '%s\n' "$conf_block" >> /etc/dkms/framework.conf
+            # NOTE: /etc/dkms/framework.conf is shared/package-owned — do NOT
+            # record it in the manifest; uninstall strips only our block.
+            success "DKMS signing config appended to /etc/dkms/framework.conf"
+        fi
+    fi
 }
 
 # ─── Pi/ARM64 Optimizations Setup ────────────────────────────────────────────
@@ -581,6 +736,7 @@ setup_pi_optimizations() {
     if [[ -f "$script_src" ]]; then
         run "cp '$script_src' '$script_dst'"
         run "chmod +x '$script_dst'"
+        manifest_add "$script_dst"
         success "Installed Pi optimizations script to $script_dst"
     else
         warn "apply-pi-optimizations.sh not found at $script_src"
@@ -609,6 +765,7 @@ setup_watchdog() {
     if [[ -f "$script_src" ]]; then
         run "cp '$script_src' '$script_dst'"
         run "chmod +x '$script_dst'"
+        manifest_add "$script_dst"
         success "Installed watchdog script to $script_dst"
     else
         warn "wifi-watchdog.sh not found at $script_src"
@@ -620,6 +777,7 @@ setup_watchdog() {
 
     if [[ -f "$svc_src" ]]; then
         run "cp '$svc_src' '$svc_dst'"
+        manifest_add "$svc_dst"
         success "Installed watchdog systemd service"
     else
         warn "mycowave-watchdog.service not found at $svc_src"
@@ -632,6 +790,7 @@ setup_watchdog() {
     if [[ -f "$nm_src" ]]; then
         run "cp '$nm_src' '$nm_dst'"
         run "chmod +x '$nm_dst'"
+        manifest_add "$nm_dst"
         success "Installed NetworkManager dispatcher for crash detection"
     else
         warn "99-mycowave-wifi-recover not found at $nm_src"
@@ -666,6 +825,7 @@ setup_thermal() {
     if [[ -f "$script_src" ]]; then
         run "cp '$script_src' '$script_dst'"
         run "chmod +x '$script_dst'"
+        manifest_add "$script_dst"
         success "Installed thermal monitor script to $script_dst"
     else
         warn "thermal-monitor.sh not found at $script_src"
@@ -694,62 +854,52 @@ setup_coex() {
     # Determine driver
     local driver_module=""
     case "$STRATEGY" in
-        inkernel) driver_module="rtw88_core" ;;
+        inkernel|lwfinger) driver_module="rtw88_core" ;;
         kali-dkms|ac3rn|aircrack-ng) driver_module="88XXau" ;;
     esac
 
-    # Prefer the shipped template when available; fall back to inline config.
     local coex_src="$(dirname "${BASH_SOURCE[0]}")/scripts/mycowave-coex.conf"
-    if [[ -f "$coex_src" ]]; then
-        info "Using template $coex_src"
-        if [[ "$DRY_RUN" == true ]]; then
-            info "[dry-run] would copy $coex_src → /etc/modprobe.d/mycowave-coex.conf"
+
+    if [[ "$STRATEGY" == "inkernel" || "$STRATEGY" == "lwfinger" ]]; then
+        # rtw88 (in-kernel/lwfinger) exposes a runtime coex parameter — emit it ACTIVE.
+        local btcoex=0
+        [[ "$has_bt" == true ]] && btcoex=1
+        dry_write /etc/modprobe.d/mycowave-coex.conf <<EOF
+# MycoWave - Bluetooth Coexistence Configuration (rtw88)
+# Generated by $SCRIPT_NAME v$SCRIPT_VERSION on $(date)
+# Active driver: $driver_module (strategy: $STRATEGY)
+# Internal BT detected: $has_bt
+# Reference template: $coex_src
+#
+# Runtime coexistence toggle for the in-kernel / lwfinger rtw88 stack:
+options rtw88_core rtw_btcoex_enable=$btcoex
+# Antenna sharing (0=dedicated, 1=shared; check EFUSE) — uncomment to tune:
+# options rtw88_core rtw_btcoex_ant_num=0
+EOF
+        if [[ "$has_bt" == true ]]; then
+            info "Internal Bluetooth detected - coexistence ENABLED (rtw_btcoex_enable=1)"
         else
-            mkdir -p /etc/modprobe.d
-            cp "$coex_src" /etc/modprobe.d/mycowave-coex.conf
-        fi
-        run "printf '# MycoWave auto-detect: generated on %s | internal BT: $has_bt | driver: $driver_module\n' \"\$(date)\" >> /etc/modprobe.d/mycowave-coex.conf"
-        if [[ "$STRATEGY" == "inkernel" ]]; then
-            [[ "$has_bt" == true ]] && info "Internal Bluetooth detected - coexistence ENABLED (see template)" \
-                                    || info "No internal Bluetooth - coexistence DISABLED (see template)"
-        else
-            info "DKMS driver - coexistence is compile-time only (see template)"
+            info "No internal Bluetooth - coexistence DISABLED (rtw_btcoex_enable=0)"
         fi
     else
-        info "Template not found at $coex_src - writing inline config"
-        # Create coex config
-        dry_write /etc/modprobe.d/mycowave-coex.conf <<EOF
-# MycoWave - Bluetooth Coexistence Configuration
-# Generated on $(date)
-# Internal BT detected: $has_bt
-# Driver: $driver_module
-
-EOF
-
-        if [[ "$STRATEGY" == "inkernel" ]]; then
-            if [[ "$has_bt" == true ]]; then
-                run "cat >> /etc/modprobe.d/mycowave-coex.conf <<'EOF2'
-# Internal Bluetooth detected - enable coexistence
-options rtw88_core rtw_btcoex_enable=1
-# Antenna sharing: 0=dedicated, 1=shared (check EFUSE)
-# options rtw88_core rtw_btcoex_ant_num=0
-EOF2"
-                info "Internal Bluetooth detected - coexistence ENABLED"
+        # DKMS 88XXau has no runtime coex option (CONFIG_RTW_COEX is compile-time);
+        # keep the shipped template (all comments) as reference only.
+        if [[ -f "$coex_src" ]]; then
+            if [[ "$DRY_RUN" == true ]]; then
+                info "[dry-run] would copy reference template $coex_src → /etc/modprobe.d/mycowave-coex.conf"
             else
-                run "cat >> /etc/modprobe.d/mycowave-coex.conf <<'EOF2'
-# No internal Bluetooth - disable coexistence to reduce overhead
-options rtw88_core rtw_btcoex_enable=0
-EOF2"
-                info "No internal Bluetooth - coexistence DISABLED"
+                mkdir -p /etc/modprobe.d
+                cp "$coex_src" /etc/modprobe.d/mycowave-coex.conf
+                manifest_add /etc/modprobe.d/mycowave-coex.conf
             fi
         else
-            run "cat >> /etc/modprobe.d/mycowave-coex.conf <<'EOF2'
-# DKMS driver (88XXau) - coexistence controlled at compile time (CONFIG_RTW_COEX)
-# No runtime module parameters available for coex in DKMS driver
-# If internal BT present, ensure driver was built with CONFIG_RTW_COEX=y
-EOF2"
-            info "DKMS driver - coexistence is compile-time only"
+            dry_write /etc/modprobe.d/mycowave-coex.conf <<EOF
+# MycoWave - Bluetooth Coexistence Configuration (DKMS reference)
+# Generated on $(date)
+# Driver: $driver_module — runtime coex is not supported; compile-time CONFIG_RTW_COEX only.
+EOF
         fi
+        info "DKMS driver ($driver_module) - coexistence is compile-time only (CONFIG_RTW_COEX); not applicable at runtime"
     fi
 
     success "Bluetooth coexistence config written to /etc/modprobe.d/mycowave-coex.conf"
@@ -768,6 +918,7 @@ setup_crash_collector() {
     if [[ -f "$script_src" ]]; then
         run "cp '$script_src' '$script_dst'"
         run "chmod +x '$script_dst'"
+        manifest_add "$script_dst"
         success "Installed crash collector script to $script_dst"
     else
         warn "collect-crash.sh not found at $script_src"
@@ -982,10 +1133,13 @@ run_full_test_suite() {
     # Expected module derived from the chosen strategy (explicit, no globals).
     local expected_module=""
     case "$STRATEGY" in
-        inkernel) expected_module="rtw_8812au" ;;
+        inkernel|lwfinger) expected_module="rtw_8812au" ;;
         kali-dkms|ac3rn|aircrack-ng) expected_module="88XXau" ;;
         *) expected_module="88XXau" ;;
     esac
+
+    # Injection check outcome (OK|FAILED|SKIPPED) reported in the final summary.
+    local inj_status="SKIPPED"
 
     # NOTE: every run_test call ends with || true so a failing test never
     # aborts the suite under set -e; the summary below is always reached.
@@ -1029,6 +1183,20 @@ run_full_test_suite() {
     local mon="${iface}mon"
     run_test "Monitor interface created ($mon)" "[[ -e /sys/class/net/$mon ]]" || true
 
+    # Test 11b: Real injection capability via aireplay-ng (non-fatal).
+    if [[ ! -e "/sys/class/net/$mon" ]]; then
+        warn "Injection test SKIPPED (monitor interface $mon not present)"
+    elif ! command -v aireplay-ng >/dev/null 2>&1; then
+        warn "Injection test SKIPPED (aireplay-ng not installed)"
+    elif aireplay-ng -9 "$mon" >/dev/null 2>&1; then
+        inj_status="OK"
+        success "✓ Injection capability (aireplay-ng -9 $mon)"
+    else
+        inj_status="FAILED"
+        error "✗ Injection capability (aireplay-ng -9 $mon)"
+        all_passed=false
+    fi
+
     # Test 12: Cleanup monitor
     run_test "Monitor cleanup works" "airmon-ng stop $mon >/dev/null 2>&1" || true
 
@@ -1063,6 +1231,13 @@ run_full_test_suite() {
 
     # Test 20: udev rules installed
     run_test "udev rules installed" "[[ -f /etc/udev/rules.d/90-awus036ach.rules ]]" || true
+
+    # Explicit capability summary (managed vs injection).
+    local managed_status="FAILED"
+    if lsmod 2>/dev/null | grep -qE '^(88XXau|rtw_8812au)' && [[ -e "/sys/class/net/$iface" ]]; then
+        managed_status="OK"
+    fi
+    info "managed: $managed_status | injection: $inj_status"
 
     echo
     if [[ "$all_passed" == true ]]; then
@@ -1113,6 +1288,19 @@ uninstall_driver() {
 
     run "systemctl daemon-reload"
 
+    # Remove MycoWave-created artifacts recorded at install time. This is the
+    # authoritative list: package-owned files are only present if MycoWave
+    # itself created/overwrote them.
+    if [[ "$DRY_RUN" == true ]]; then
+        info "[dry-run] would remove paths recorded in $MANIFEST_FILE"
+    elif [[ -f "$MANIFEST_FILE" ]]; then
+        local recorded=""
+        while IFS= read -r recorded; do
+            [[ -n "$recorded" ]] || continue
+            run "rm -f '$recorded'"
+        done < "$MANIFEST_FILE"
+    fi
+
     # Remove udev rules
     run "rm -f /etc/udev/rules.d/90-awus036ach.rules"
     run "rm -f /etc/udev/rules.d/99-mycowave-usb-pm.rules"
@@ -1131,6 +1319,12 @@ uninstall_driver() {
     run "rm -f /etc/modprobe.d/awus036ach-performance.conf"
     run "rm -f /etc/modprobe.d/mycowave-pi.conf"
     run "rm -f /etc/modprobe.d/mycowave-coex.conf"
+    run "rm -f /etc/modprobe.d/rtw88.conf"
+
+    # Strip only the MycoWave signing block from the shared DKMS framework.conf.
+    if [[ -f /etc/dkms/framework.conf ]]; then
+        run "sed -i '/^# MycoWave signing (managed)/,/^# End MycoWave signing/d' /etc/dkms/framework.conf"
+    fi
 
     # Remove scripts
     run "rm -f /usr/local/bin/mycowave-enroll-mok"
@@ -1174,9 +1368,31 @@ uninstall_driver() {
 
     # Remove leftover DKMS sources, installer clones, regdomain, firmware copies
     run "rm -rf /usr/src/rtl88xxau-* /usr/src/rtl8812au-* /usr/src/rtl8814au-*"
-    run "rm -rf /tmp/realtek-rtl88xxau-auto-installer /tmp/rtl8812au"
-    run "rm -f /etc/default/crda"
-    run "rm -f /lib/firmware/rtlwifi/rtw8812a_fw.bin /lib/firmware/rtlwifi/rtw8821a_fw.bin /lib/firmware/rtlwifi/rtw8812b_fw.bin"
+    run "rm -rf /tmp/realtek-rtl88xxau-auto-installer /tmp/rtl8812au /tmp/rtw88"
+
+    # /etc/default/crda is package-owned (crda): only remove if MycoWave created it.
+    if manifest_has /etc/default/crda; then
+        run "rm -f /etc/default/crda"
+    elif [[ -e /etc/default/crda ]]; then
+        warn "Keeping /etc/default/crda (not created by MycoWave; package-owned by crda). Remove manually if desired."
+    fi
+
+    # Firmware blobs under /lib/firmware/rtlwifi are package-owned (linux-firmware):
+    # only remove copies MycoWave itself installed.
+    local fw_candidate=""
+    for fw_candidate in \
+        /lib/firmware/rtlwifi/rtw8812a_fw.bin \
+        /lib/firmware/rtlwifi/rtw8821a_fw.bin \
+        /lib/firmware/rtlwifi/rtw8812b_fw.bin; do
+        if manifest_has "$fw_candidate"; then
+            run "rm -f '$fw_candidate'"
+        elif [[ -e "$fw_candidate" ]]; then
+            warn "Keeping $fw_candidate (not created by MycoWave; package-owned by linux-firmware)."
+        fi
+    done
+
+    # Drop the manifest last (its own directory is MycoWave-owned).
+    run "rm -rf '$MANIFEST_DIR'"
 
     success "Uninstall complete. Reboot recommended."
 }
@@ -1189,7 +1405,8 @@ print_banner() {
 ║       Alpha AWUS036ACH Driver Installer for Kali Linux              ║
 ╠═══════════════════════════════════════════════════════════════════════╣
 ║  Smart installer supporting:                                        ║
-║  • Kali 2024.x - 2026.1+ (Kernel 6.6 - 6.18+)                      ║
+║  • Kali 2024.x - 2026.1+ (Kernel 6.6 - 7.x; 6.19+ unmaintained)    ║
+║  • Strategies: lwfinger rtw88, ac3rn, kali-dkms, aircrack-ng       ║
 ║  • x86_64, ARM64 (Raspberry Pi)                                    ║
 ║  • Secure Boot (MOK enrollment)                                     ║
 ║  • Auto monitor mode, injection test, 5GHz channels                ║
@@ -1206,7 +1423,8 @@ Options:
   --dry-run              Show what would be done without making changes
   --verbose, -v          Verbose output
   --uninstall            Remove driver and all configuration
-  --force-method METHOD  Force install method: inkernel|kali-dkms|ac3rn|aircrack-ng
+  --force-method METHOD  Force install method: inkernel|lwfinger|kali-dkms|ac3rn|aircrack-ng
+                         (kali-dkms is refused on kernels > 6.13)
   --skip-verify          Skip post-install verification
   --skip-monitor         Skip automatic monitor mode setup
   --reg-domain CODE      Regulatory domain for 5GHz (default: BO)
@@ -1225,7 +1443,9 @@ Options:
 Examples:
   sudo $0                          # Auto-detect and install
   sudo $0 --dry-run                # Preview actions
-  sudo $0 --force-method ac3rn     # Force Ac3rN patched DKMS
+  sudo $0 --force-method ac3rn     # Force Ac3rN patched DKMS (6.15-6.18)
+  sudo $0 --force-method lwfinger  # Force lwfinger/rtw88 managed backport
+  sudo $0 --force-method inkernel  # Force in-kernel rtw88 (recommended on 6.19+/7.x)
   sudo $0 --uninstall              # Remove everything
   sudo $0 --verbose --reg-domain US
   sudo $0 --performance            # Install with performance optimizations
@@ -1242,7 +1462,7 @@ parse_args() {
             --dry-run) DRY_RUN=true ;;
             --verbose|-v) VERBOSE=true ;;
             --uninstall) UNINSTALL=true ;;
-            --force-method) [[ $# -lt 2 ]] && { error "--force-method requires an argument (inkernel|kali-dkms|ac3rn|aircrack-ng)"; usage; exit 1; }; FORCE_METHOD="$2"; shift ;;
+            --force-method) [[ $# -lt 2 ]] && { error "--force-method requires an argument (inkernel|lwfinger|kali-dkms|ac3rn|aircrack-ng)"; usage; exit 1; }; FORCE_METHOD="$2"; shift ;;
             --skip-verify) SKIP_VERIFY=true ;;
             --skip-monitor) SKIP_MONITOR_SETUP=true ;;
             --reg-domain) [[ $# -lt 2 ]] && { error "--reg-domain requires an argument (e.g. BO, US)"; usage; exit 1; }; REG_DOMAIN="$2"; shift ;;
@@ -1266,7 +1486,11 @@ parse_args() {
 main() {
     parse_args "$@"
 
-    # Initialize log directory/file FIRST (before any log/info/warn call).
+    # Root check FIRST: a non-root user must get the friendly error, not a
+    # cryptic set -e failure from the log-file mkdir/touch below.
+    require_root
+
+    # Initialize log directory/file (before any log/info/warn call).
     # Gated by run() so --dry-run changes nothing; log helpers skip file
     # appends in DRY_RUN mode so this ordering is always safe.
     run "mkdir -p /var/log"
@@ -1274,7 +1498,6 @@ main() {
     run "chmod 644 '$LOG_FILE'"
 
     print_banner
-    require_root
 
     detect_os
     detect_kernel
@@ -1307,6 +1530,7 @@ main() {
     # Execute chosen strategy
     case "$STRATEGY" in
         inkernel) install_inkernel ;;
+        lwfinger) install_lwfinger ;;
         kali-dkms) install_kali_dkms ;;
         ac3rn) install_ac3rn ;;
         aircrack-ng) install_aircrack_ng ;;
@@ -1331,11 +1555,12 @@ main() {
         SKIP_VERIFY=true
         info "--test requested: skipping smoke verification in favor of full suite"
     fi
-    verify_install
+    # Failure here must not abort main under set -e before the banner.
+    verify_install || warn "Smoke verification reported issues — installation may be incomplete."
 
-    # Run comprehensive test suite if requested
+    # Run comprehensive test suite if requested (non-fatal).
     if [[ "$RUN_TEST_SUITE" == true ]]; then
-        run_full_test_suite
+        run_full_test_suite || warn "Test suite reported failures — review output above."
     fi
 
     log "═══════════════════════════════════════════════════════════"

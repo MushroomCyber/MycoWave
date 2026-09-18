@@ -36,16 +36,24 @@ sudo /usr/local/bin/mycowave-enroll-mok full
 
 ### 2. "DKMS build failed" on kernel 6.15+
 
-**Cause**: Kernel API changes (timer, cfg80211, EXTRA_CFLAGS).
+**Cause**: Kernel API changes (timer, cfg80211, EXTRA_CFLAGS). The Kali
+`realtek-rtl88xxau-dkms` package is frozen at 2025-03-30 and cannot build on 6.15+.
 
 **Solution**:
 ```bash
-# Use Ac3rN patched installer
+# Use Ac3rN patched installer (6.15-6.18)
 sudo ./mycowave-install.sh --force-method ac3rn
+
+# Or the managed-mode lwfinger/rtw88 backport (injection NOT guaranteed)
+sudo ./mycowave-install.sh --force-method lwfinger
 
 # Or downgrade kernel
 sudo apt install linux-image-6.13.0-kali-amd64
 ```
+
+> `--force-method kali-dkms` is **refused** on kernels `> 6.13` for this reason.
+> On `≥ 6.19` (incl. 7.x) `ac3rn` is experimental/unmaintained — prefer
+> `--force-method inkernel` for managed use.
 
 ### 3. "Monitor mode fails / interface not created"
 
@@ -97,7 +105,8 @@ echo "dwc_otg.fiq_fsm_enable=0" | sudo tee -a /boot/config.txt
 
 ### 6. "Injection test fails (0%)"
 
-**Cause**: Wrong interface, distance, or driver issue.
+**Cause**: Wrong interface, distance, driver issue — or you are on an `rtw88`-based
+strategy (`inkernel`/`lwfinger`), where injection is not guaranteed.
 
 **Solution**:
 ```bash
@@ -108,6 +117,11 @@ sudo aireplay-ng -9 wlan0mon
 # Check injection capability
 iw dev wlan0mon info | grep -i monitor
 ```
+
+For reliable `airodump-ng`/`aireplay-ng`, use an out-of-tree `88XXau` strategy
+(`ac3rn`, `kali-dkms`, or `--force-method aircrack-ng`). In-kernel `rtw88` and the
+`lwfinger` backport are managed-mode drivers; see upstream issues #424/#428/#453 and
+the kernel ≥ 6.9 channel-pinning bug.
 
 ### 7. "arm64/Pi: DKMS build fails — missing headers"
 
@@ -187,15 +201,17 @@ echo 2 | sudo tee /sys/module/88XXau/parameters/rtw_switch_usb_mode
 
 ## Kernel Version Matrix
 
-| Kernel | Working Strategy | Broken Strategy |
-|--------|-----------------|-----------------|
-| 6.18+ | inkernel, ac3rn | kali-dkms, aircrack-ng |
-| 6.15–6.17 | ac3rn, inkernel* | kali-dkms |
-| 6.14 | inkernel, kali-dkms | aircrack-ng |
-| 6.6–6.13 | kali-dkms, aircrack-ng | ac3rn (unnecessary) |
-| < 6.6 | aircrack-ng | kali-dkms (may work) |
+| Kernel | Auto Strategy | Reliable Injection | Notes |
+|--------|---------------|--------------------|-------|
+| ≥ 6.19 (incl. 7.x) | `ac3rn` ⚠️ | None guaranteed (unmaintained) | Experimental/unmaintained; prefer `inkernel` for managed use |
+| 6.15–6.18 | `ac3rn` | `ac3rn` / `aircrack-ng` | `kali-dkms` does not build here |
+| 6.14 | `inkernel` | `kali-dkms`* / `aircrack-ng` | `rtw88` managed only |
+| 6.6–6.13 | `kali-dkms` | `kali-dkms` / `aircrack-ng` | Kali package hard-gated to ≤ 6.13 |
+| < 6.6 | `lwfinger` | `aircrack-ng` | lwfinger is managed-mode only |
 
-*inkernel requires 6.14+
+*`kali-dkms` on 6.14 is force-only (`--force-method kali-dkms`).
+In-kernel `rtw88` and `lwfinger` are reliable in managed mode but **not** for
+`airodump-ng`/`aireplay-ng` injection.
 
 ---
 

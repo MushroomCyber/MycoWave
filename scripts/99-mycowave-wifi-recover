@@ -50,9 +50,15 @@ if [[ "$ACTION" == "down" ]]; then
     done
 
     if [[ "$crash_detected" == true ]]; then
-        log "Scheduling watchdog recovery..."
-        # Trigger the watchdog service to run recovery
-        systemctl restart mycowave-watchdog.service 2>/dev/null || true
+        log "Triggering immediate watchdog recovery..."
+        # Prefer a one-shot recovery over merely restarting the polling
+        # daemon, which sleeps before its first health check.
+        if /usr/local/bin/wifi-watchdog recover 2>/dev/null; then
+            log "Immediate recovery completed via wifi-watchdog recover"
+        else
+            systemctl restart mycowave-watchdog.service 2>/dev/null || true
+            log "Fell back to restarting mycowave-watchdog.service"
+        fi
     else
         log "No driver crash detected - normal interface down"
     fi
@@ -61,8 +67,8 @@ fi
 # On interface up, ensure monitor mode if configured
 if [[ "$ACTION" == "up" ]]; then
     # Check if monitor mode service is enabled
-    if systemctl is-enabled mycowave-monitor.service >/dev/null 2>&1; then
-        log "Interface $IFACE up - monitor mode managed by mycowave-monitor.service"
+    if systemctl is-enabled awus036ach-monitor.service >/dev/null 2>&1; then
+        log "Interface $IFACE up - monitor mode managed by awus036ach-monitor.service"
     fi
 fi
 

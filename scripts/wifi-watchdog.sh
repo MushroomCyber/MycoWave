@@ -257,32 +257,32 @@ run_watchdog() {
 
         # Run health checks
         if ! check_interface_exists; then
-            ((checks_failed++))
+            checks_failed=$((checks_failed + 1))
             check_details+=("interface missing")
         fi
 
         if ! check_driver_loaded; then
-            ((checks_failed++))
+            checks_failed=$((checks_failed + 1))
             check_details+=("driver not loaded")
         fi
 
         if ! check_carrier; then
-            ((checks_failed++))
+            checks_failed=$((checks_failed + 1))
             check_details+=("no carrier")
         fi
 
         if ! check_tx_queue; then
-            ((checks_failed++))
+            checks_failed=$((checks_failed + 1))
             check_details+=("TX queue stuck")
         fi
 
         if ! check_firmware_crash; then
-            ((checks_failed++))
+            checks_failed=$((checks_failed + 1))
             check_details+=("firmware crash detected")
         fi
 
         if ! check_monitor_mode; then
-            ((checks_failed++))
+            checks_failed=$((checks_failed + 1))
             check_details+=("monitor mode down")
         fi
 
@@ -291,7 +291,7 @@ run_watchdog() {
             failure_count=0
             verbose "All checks passed"
         else
-            ((failure_count++))
+            failure_count=$((failure_count + 1))
             warn "Health check failed ($failure_count/$MAX_FAILURES): ${check_details[*]}"
 
             # Check cooldown
@@ -312,12 +312,12 @@ run_once() {
     local checks_failed=0
     local check_details=()
 
-    check_interface_exists || { ((checks_failed++)); check_details+=("interface missing"); }
-    check_driver_loaded || { ((checks_failed++)); check_details+=("driver not loaded"); }
-    check_carrier || { ((checks_failed++)); check_details+=("no carrier"); }
-    check_tx_queue || { ((checks_failed++)); check_details+=("TX queue stuck"); }
-    check_firmware_crash || { ((checks_failed++)); check_details+=("firmware crash"); }
-    check_monitor_mode || { ((checks_failed++)); check_details+=("monitor mode down"); }
+    check_interface_exists || { checks_failed=$((checks_failed + 1)); check_details+=("interface missing"); }
+    check_driver_loaded || { checks_failed=$((checks_failed + 1)); check_details+=("driver not loaded"); }
+    check_carrier || { checks_failed=$((checks_failed + 1)); check_details+=("no carrier"); }
+    check_tx_queue || { checks_failed=$((checks_failed + 1)); check_details+=("TX queue stuck"); }
+    check_firmware_crash || { checks_failed=$((checks_failed + 1)); check_details+=("firmware crash"); }
+    check_monitor_mode || { checks_failed=$((checks_failed + 1)); check_details+=("monitor mode down"); }
 
     if (( checks_failed == 0 )); then
         success "All health checks PASSED"
