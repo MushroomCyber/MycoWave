@@ -14,7 +14,7 @@ LOG_TAG="mycowave-watchdog"
 
 # Driver module names (tried in order)
 DKMS_MODULES=("88XXau" "8812au" "8814au")
-INKERNEL_MODULES=("rtw_8812au" "rtw_8821au" "rtw_8814au")
+INKERNEL_MODULES=("rtw88_8812au" "rtw88_8821au" "rtw88_8814au")
 ALL_MODULES=("${DKMS_MODULES[@]}" "${INKERNEL_MODULES[@]}")
 
 # Colors (for interactive runs)

@@ -69,9 +69,9 @@ After install, just **plug in the AWUS036ACH** — monitor mode starts automatic
 
 | Kernel Version | Strategy | Driver |
 |----------------|----------|--------|
-| **≥ 6.19** (incl. 7.x) | `inkernel` | In-kernel `rtw_8812au` (mac80211). No maintained out-of-tree rtl8812au driver supports 6.19+/7.x, and Kali rolling drops headers for older kernels so a DKMS build is not possible. Managed + monitor mode; injection not guaranteed |
+| **≥ 6.19** (incl. 7.x) | `inkernel` | In-kernel `rtw88_8812au` (mac80211). No maintained out-of-tree rtl8812au driver supports 6.19+/7.x, and Kali rolling drops headers for older kernels so a DKMS build is not possible. Managed + monitor mode; injection not guaranteed |
 | **6.15 – 6.18** | `ac3rn` | Ac3rN patched **source build** (`install_alfa_driver.sh`; supports only 6.15/6.16/6.18) |
-| **6.14** | `inkernel` | In-kernel `rtw_8812au` (mac80211) |
+| **6.14** | `inkernel` | In-kernel `rtw88_8812au` (mac80211) |
 | **6.6 – 6.13** | `kali-dkms` | Kali `realtek-rtl88xxau-dkms` package (frozen at 2025-03-30; hard-gated to ≤ 6.13) |
 | **< 6.6** | `lwfinger` | `lwfinger/rtw88` DKMS backport (managed mode; injection NOT guaranteed) |
 

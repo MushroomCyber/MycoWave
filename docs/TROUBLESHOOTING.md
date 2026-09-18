@@ -7,7 +7,7 @@
 sudo ./mycowave-install.sh --dry-run
 
 # Check driver status
-lsmod | grep -E '88XXau|rtw_8812au|8812au|8821au'
+lsmod | grep -E '88XXau|rtw88_8812au|8812au|8821au'
 
 # Check interface
 ip link show wlan0
@@ -154,16 +154,16 @@ sudo dkms autoinstall -k $(uname -r)
 
 ### 8. "Driver conflict: both DKMS and in-kernel loaded"
 
-**Cause**: Both 88XXau and rtw_8812au trying to bind device.
+**Cause**: Both 88XXau and rtw88_8812au trying to bind device.
 
 **Solution**:
 ```bash
 # Check which is loaded
-lsmod | grep -E '88XXau|rtw_8812au'
+lsmod | grep -E '88XXau|rtw88_8812au'
 
 # Unload unwanted, load desired
 sudo modprobe -r 88XXau
-sudo modprobe rtw_8812au
+sudo modprobe rtw88_8812au
 
 # Or let MycoWave fix it
 sudo ./mycowave-install.sh  # Re-runs conflict resolution
@@ -252,7 +252,7 @@ In-kernel `rtw88` and `lwfinger` are reliable in managed mode but **not** for
 ```bash
 # Full driver info
 modinfo 88XXau
-modinfo rtw_8812au
+modinfo rtw88_8812au
 
 # Kernel messages (WiFi only)
 dmesg -T | grep -iE "rtw|8812|8821|wlan|firmware"

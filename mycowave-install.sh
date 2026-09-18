@@ -171,11 +171,11 @@ detect_driver_conflicts() {
     CONFLICT_DETECTED=false
 
     lsmod | grep -q '^88XXau' && DKMS_LOADED=true || true
-    lsmod | grep -q '^rtw_8812au' && INKERNEL_LOADED=true || true
+    lsmod | grep -q '^rtw88_8812au' && INKERNEL_LOADED=true || true
 
     if [[ "$DKMS_LOADED" == true && "$INKERNEL_LOADED" == true ]]; then
         CONFLICT_DETECTED=true
-        warn "Driver conflict: both DKMS (88XXau) and in-kernel (rtw_8812au) loaded"
+        warn "Driver conflict: both DKMS (88XXau) and in-kernel (rtw88_8812au) loaded"
     fi
     verbose "DKMS loaded: $DKMS_LOADED, In-kernel loaded: $INKERNEL_LOADED, Conflict: $CONFLICT_DETECTED"
 }
@@ -336,15 +336,28 @@ EOF
     run "rm -f /etc/modprobe.d/blacklist-rtw88.conf"
     run "update-initramfs -u"
 
-    # Load module
-    run "modprobe rtw_8812au"
+    # Load module. Never abort on failure: the module may be absent on this
+    # kernel, or already loaded/bound on a re-run. Give actionable guidance.
+    if [[ "$DRY_RUN" != true ]] && ! modinfo rtw88_8812au >/dev/null 2>&1; then
+        error "rtw88_8812au is NOT available in /lib/modules/$(uname -r)."
+        error "Kernel $KERNEL_VERSION may not ship the driver, or the matching"
+        error "linux-modules package is not installed. Check: modinfo rtw88_8812au"
+        error "If unavailable, boot a kernel that provides it (e.g. 6.19.x) or"
+        error "install headers for this kernel and use --force-method ac3rn."
+        return 1
+    fi
+    run "modprobe rtw88_8812au" || true
     sleep 2
 
     # Verify (skipped in dry-run: module load is simulated)
     if [[ "$DRY_RUN" != true ]]; then
-        lsmod | grep -q '^rtw_8812au' || { error "rtw_8812au failed to load"; return 1; }
+        if lsmod | grep -q '^rtw88_8812au'; then
+            success "In-kernel rtw88_8812au loaded"
+        else
+            warn "rtw88_8812au did not load — the USB adapter may be unplugged or the"
+            warn "module may already be bound. Verify: lsmod | grep rtw88"
+        fi
     fi
-    success "In-kernel rtw_8812au loaded"
 }
 
 install_kali_dkms() {
@@ -357,9 +370,9 @@ install_kali_dkms() {
 
     # Blacklist in-kernel driver to prevent conflict (single write = idempotent)
     dry_write /etc/modprobe.d/blacklist-rtw88.conf <<'EOF'
-blacklist rtw_8812au
-blacklist rtw_8821au
-blacklist rtw_8814au
+blacklist rtw88_8812au
+blacklist rtw88_8821au
+blacklist rtw88_8814au
 EOF
     # Clear the blacklist created by install_inkernel so the DKMS module can load
     run "rm -f /etc/modprobe.d/blacklist-rtl88xxau.conf"
@@ -426,15 +439,15 @@ install_ac3rn() {
 
     # Build succeeded → blacklist in-kernel rtw88 so 88XXau binds the device.
     dry_write /etc/modprobe.d/blacklist-rtw88.conf <<'EOF'
-blacklist rtw_8812au
-blacklist rtw_8821au
-blacklist rtw_8814au
+blacklist rtw88_8812au
+blacklist rtw88_8821au
+blacklist rtw88_8814au
 EOF
     # Clear the blacklist created by install_inkernel so the DKMS module can load
     run "rm -f /etc/modprobe.d/blacklist-rtl88xxau.conf"
     run "update-initramfs -u"
 
-    run "modprobe -r rtw_8812au" || true
+    run "modprobe -r rtw88_8812au" || true
     run "modprobe 88XXau"
     sleep 2
 
@@ -472,15 +485,15 @@ install_aircrack_ng() {
 
     # Build succeeded → blacklist in-kernel rtw88 so 88XXau binds the device.
     dry_write /etc/modprobe.d/blacklist-rtw88.conf <<'EOF'
-blacklist rtw_8812au
-blacklist rtw_8821au
-blacklist rtw_8814au
+blacklist rtw88_8812au
+blacklist rtw88_8821au
+blacklist rtw88_8814au
 EOF
     # Clear the blacklist created by install_inkernel so the DKMS module can load
     run "rm -f /etc/modprobe.d/blacklist-rtl88xxau.conf"
     run "update-initramfs -u"
 
-    run "modprobe -r rtw_8812au" || true
+    run "modprobe -r rtw88_8812au" || true
     run "modprobe 88XXau"
     sleep 2
 
@@ -528,7 +541,7 @@ EOF
 
     # Verify (skipped in dry-run: module load is simulated)
     if [[ "$DRY_RUN" != true ]]; then
-        lsmod | grep -q '^rtw_8812au' || { error "rtw88_8812au failed to load"; return 1; }
+        lsmod | grep -q '^rtw88_8812au' || { error "rtw88_8812au failed to load"; return 1; }
     fi
     success "lwfinger/rtw88 driver loaded (managed mode; injection NOT guaranteed)"
 }
@@ -1055,7 +1068,7 @@ setup_monitor_mode() {
     [[ "$SKIP_MONITOR_SETUP" == true ]] && { info "Skipping monitor mode setup"; return; }
 
     log "Configuring automatic monitor mode..."
-    warn "Monitor setup renames 88XXau/rtw_8812au interfaces to wlan0 and the boot-time"
+    warn "Monitor setup renames 88XXau/rtw88_8812au interfaces to wlan0 and the boot-time"
     warn "service runs 'airmon-ng check kill' (kills NetworkManager). On multi-NIC systems"
     warn "this can disrupt other interfaces — re-run with --skip-monitor to opt out."
 
@@ -1063,7 +1076,7 @@ setup_monitor_mode() {
     dry_write /etc/udev/rules.d/90-awus036ach.rules <<'EOF'
 # Alpha AWUS036ACH - consistent naming
 SUBSYSTEM=="net", ACTION=="add", DRIVERS=="88XXau", NAME="wlan0"
-SUBSYSTEM=="net", ACTION=="add", DRIVERS=="rtw_8812au", NAME="wlan0"
+SUBSYSTEM=="net", ACTION=="add", DRIVERS=="rtw88_8812au", NAME="wlan0"
 EOF
 
     # 2. Create NetworkManager dispatcher to auto-enable monitor mode on plug
@@ -1137,7 +1150,7 @@ setup_dkms_autorebuild() {
     dry_write /etc/initramfs-tools/scripts/init-top/awus036ach <<'EOF'
 #!/bin/sh
 # Load AWUS036ACH driver early for initramfs
-modprobe 88XXau 2>/dev/null || modprobe rtw_8812au 2>/dev/null || true
+modprobe 88XXau 2>/dev/null || modprobe rtw88_8812au 2>/dev/null || true
 EOF
     run "chmod +x /etc/initramfs-tools/scripts/init-top/awus036ach"
     run "update-initramfs -u"
@@ -1173,7 +1186,7 @@ verify_install() {
     info "Driver: $driver"
 
     # Check module loaded
-    if ! lsmod | grep -qE '^(88XXau|rtw_8812au)'; then
+    if ! lsmod | grep -qE '^(88XXau|rtw88_8812au)'; then
         error "No driver module loaded"
         return 1
     fi
@@ -1208,7 +1221,7 @@ run_full_test_suite() {
     # Expected module derived from the chosen strategy (explicit, no globals).
     local expected_module=""
     case "$STRATEGY" in
-        inkernel|lwfinger) expected_module="rtw_8812au" ;;
+        inkernel|lwfinger) expected_module="rtw88_8812au" ;;
         kali-dkms|ac3rn|aircrack-ng) expected_module="88XXau" ;;
         *) expected_module="88XXau" ;;
     esac
@@ -1220,7 +1233,7 @@ run_full_test_suite() {
     # aborts the suite under set -e; the summary below is always reached.
 
     # Test 1: Driver loaded & version
-    run_test "Driver module loaded" "lsmod | grep -qE '^(88XXau|rtw_8812au)'" || true
+    run_test "Driver module loaded" "lsmod | grep -qE '^(88XXau|rtw88_8812au)'" || true
 
     # Test 2: Interface up
     run_test "Interface $iface exists" "[[ -e /sys/class/net/$iface ]]" || true
@@ -1279,7 +1292,7 @@ run_full_test_suite() {
     run_test "USB device responsive" "lsusb -d 0bda:a811 2>/dev/null | grep -q Realtek" || true
 
     # Test 14: No driver conflict
-    run_test "No driver conflict (single driver)" "! (lsmod | grep -q '^88XXau' && lsmod | grep -q '^rtw_8812au')" || true
+    run_test "No driver conflict (single driver)" "! (lsmod | grep -q '^88XXau' && lsmod | grep -q '^rtw88_8812au')" || true
 
     # Test 15: Module parameters applied (if performance enabled)
     if [[ "$ENABLE_PERFORMANCE" == true ]]; then
@@ -1309,7 +1322,7 @@ run_full_test_suite() {
 
     # Explicit capability summary (managed vs injection).
     local managed_status="FAILED"
-    if lsmod 2>/dev/null | grep -qE '^(88XXau|rtw_8812au)' && [[ -e "/sys/class/net/$iface" ]]; then
+    if lsmod 2>/dev/null | grep -qE '^(88XXau|rtw88_8812au)' && [[ -e "/sys/class/net/$iface" ]]; then
         managed_status="OK"
     fi
     info "managed: $managed_status | injection: $inj_status"
@@ -1430,9 +1443,9 @@ uninstall_driver() {
     run "modprobe -r 88XXau 2>/dev/null || true"
     run "modprobe -r 8812au 2>/dev/null || true"
     run "modprobe -r 8814au 2>/dev/null || true"
-    run "modprobe -r rtw_8812au 2>/dev/null || true"
-    run "modprobe -r rtw_8821au 2>/dev/null || true"
-    run "modprobe -r rtw_8814au 2>/dev/null || true"
+    run "modprobe -r rtw88_8812au 2>/dev/null || true"
+    run "modprobe -r rtw88_8821au 2>/dev/null || true"
+    run "modprobe -r rtw88_8814au 2>/dev/null || true"
 
     # Remove DKMS modules (correct names: rtl88xxau/88XXau, rtl8814au)
     run "dkms remove -m rtl88xxau -v all --all 2>/dev/null || true"

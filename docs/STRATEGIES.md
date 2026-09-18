@@ -111,7 +111,7 @@ unsupported there, and the installer defaults to in-kernel `rtw88` instead.
 - Works on kernels 6.15–6.18 where the standard Kali DKMS package fails
 - Maintains monitor mode + injection support
 
-**MycoWave config**: Blacklists in-kernel `rtw_8812au`/`rtw_8821au`/`rtw_8814au`
+**MycoWave config**: Blacklists in-kernel `rtw88_8812au`/`rtw88_8821au`/`rtw88_8814au`
 
 ---
 
@@ -139,7 +139,7 @@ unsupported there, and the installer defaults to in-kernel `rtw88` instead.
 - Requires the running kernel's build tree (`/lib/modules/$(uname -r)/build`); the installer aborts early if it is missing
 - MycoWave **hard-gates** this strategy to kernel ≤ 6.13 and refuses `--force-method kali-dkms` on 6.15+
 
-**MycoWave config**: Blacklists in-kernel `rtw_8812au`/`rtw_8821au`/`rtw_8814au`
+**MycoWave config**: Blacklists in-kernel `rtw88_8812au`/`rtw88_8821au`/`rtw88_8814au`
 
 ---
 
@@ -196,7 +196,7 @@ Select it explicitly with `--force-method aircrack-ng` when injection is the pri
 - Latest community patches
 - `rtw_tx_pwr_idx_override` module parameter (commx/dernyn fork)
 
-**MycoWave config**: Blacklists in-kernel `rtw_8812au`/`rtw_8821au`/`rtw_8814au`
+**MycoWave config**: Blacklists in-kernel `rtw88_8812au`/`rtw88_8821au`/`rtw88_8814au`
 
 ---
 
@@ -207,7 +207,7 @@ MycoWave automatically handles driver conflicts by blacklisting the unused drive
 | Active Strategy | Blacklisted |
 |-----------------|-------------|
 | `inkernel`, `lwfinger` | `88XXau`, `8812au`, `8814au` |
-| `kali-dkms`, `ac3rn`, `aircrack-ng` | `rtw_8812au`, `rtw_8821au`, `rtw_8814au` |
+| `kali-dkms`, `ac3rn`, `aircrack-ng` | `rtw88_8812au`, `rtw88_8821au`, `rtw88_8814au` |
 
 Blacklist files:
 - `/etc/modprobe.d/blacklist-rtl88xxau.conf` (for DKMS)
@@ -265,7 +265,7 @@ Use `--pi-optimizations` flag for USB power, CPU governor, and memory split twea
 
 After installation, MycoWave verifies:
 
-1. **Module loaded**: `lsmod | grep -E '88XXau|rtw_8812au'`
+1. **Module loaded**: `lsmod | grep -E '88XXau|rtw88_8812au'`
 2. **Interface exists**: `wlan0` in `/sys/class/net/`
 3. **Monitor mode works**: `airmon-ng start wlan0` → `wlan0mon`
 4. **Injection capable**: `aireplay-ng -9 wlan0mon` (real injection test; reported as
@@ -278,14 +278,14 @@ After installation, MycoWave verifies:
 
 ```bash
 # Check current driver
-lsmod | grep -E '88XXau|rtw_8812au|8812au|8821au'
+lsmod | grep -E '88XXau|rtw88_8812au|8812au|8821au'
 
 # Switch to in-kernel (kernel 6.14 and >= 6.19)
 sudo modprobe -r 88XXau 2>/dev/null
-sudo modprobe rtw_8812au
+sudo modprobe rtw88_8812au
 
 # Switch to DKMS
-sudo modprobe -r rtw_8812au 2>/dev/null
+sudo modprobe -r rtw88_8812au 2>/dev/null
 sudo modprobe 88XXau
 
 # Switch to lwfinger/rtw88 backport (managed mode)

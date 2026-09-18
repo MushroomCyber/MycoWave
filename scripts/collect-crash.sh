@@ -243,7 +243,7 @@ $(tail -50 "$OUT_DIR/dmesg-wifi.log" 2>/dev/null || echo "None found")
 $(ip link show "$INTERFACE" 2>/dev/null || echo "Interface not found")
 
 === Driver Module ===
-$(for mod in rtw_8812au 88XXau 8812au rtw88_8812au; do
+$(for mod in rtw88_8812au 88XXau 8812au; do
     if lsmod | grep -q "^$mod"; then
         echo "Active driver: $mod"
         modinfo "$mod" | grep -E "^version:|^srcversion:" 2>/dev/null

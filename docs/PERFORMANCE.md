@@ -202,8 +202,8 @@ options rtw88_core disable_lps_deep_mode=Y
 EOF
 
 # Reload driver
-sudo modprobe -r 88XXau rtw_8812au 2>/dev/null
-sudo modprobe 88XXau  # or rtw_8812au
+sudo modprobe -r 88XXau rtw88_8812au 2>/dev/null
+sudo modprobe 88XXau  # or rtw88_8812au
 
 # Set regulatory domain
 sudo iw reg set BO
