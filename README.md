@@ -10,7 +10,7 @@
 
 ## Overview
 
-MycoWave is a version-aware, zero-intervention installer for the **Alpha AWUS036ACH** (RTL8812AU/RTL8821AU chipset) on Kali Linux. It automatically detects your kernel version, architecture, and Secure Boot state, then selects the optimal driver strategy from five disjoint ranges — the `lwfinger/rtw88` backport on kernels `< 6.6`, in-kernel `rtw88` on 6.14, and patched DKMS builds on newer kernels. `aircrack-ng` source remains available on demand for injection workloads.
+MycoWave is a version-aware, zero-intervention installer for the **Alpha AWUS036ACH** (RTL8812AU/RTL8821AU chipset) on Kali Linux. It automatically detects your kernel version, architecture, and Secure Boot state, then selects a driver strategy from five disjoint ranges — `lwfinger/rtw88` on kernels `< 6.6`, Kali DKMS on 6.6–6.13, the Ac3rN patched source build on 6.15–6.18, and in-kernel `rtw88` on 6.14 and `≥ 6.19`. `ac3rn` and `aircrack-ng` remain available on demand via `--force-method`.
 
 **No more manual `make`, `dkms`, or `airmon-ng` fiddling.** Plug in the adapter, run MycoWave, and you're capturing packets.
 
@@ -21,7 +21,7 @@ MycoWave is a version-aware, zero-intervention installer for the **Alpha AWUS036
 | Feature | Description |
 |---------|-------------|
 | **Auto-detection** | Kernel (6.6–7.x), arch (x86_64/ARM64), Secure Boot, Kali version |
-| **Smart strategy selection** | Disjoint ranges: `lwfinger` < 6.6, Kali DKMS 6.6–6.13, in-kernel `rtw88` on 6.14, Ac3rN 6.15–6.18, Ac3rN (experimental) ≥ 6.19 |
+| **Smart strategy selection** | Disjoint ranges: `lwfinger` < 6.6, Kali DKMS 6.6–6.13, in-kernel `rtw88` on 6.14 and ≥ 6.19, Ac3rN source build 6.15–6.18 |
 | **Managed vs injection** | Out-of-tree `88XXau` (ac3rn/kali-dkms/aircrack-ng) for reliable injection; in-kernel `rtw88`/`lwfinger` for managed use |
 | **Driver conflict resolution** | Auto-blacklists competing drivers (DKMS vs in-kernel) |
 | **Monitor mode automation** | udev rules + NetworkManager dispatcher + systemd service |
@@ -29,7 +29,7 @@ MycoWave is a version-aware, zero-intervention installer for the **Alpha AWUS036
 | **Firmware updates** | Auto-copies latest `rtw88xx_fw.bin` from `linux-firmware` |
 | **DKMS auto-rebuild** | Initramfs hook + systemd service for kernel upgrades |
 | **Post-install verification** | Module load, monitor mode, injection capability, 5GHz channels |
-| **Comprehensive test suite** | `--test` flag: 20 checks incl. a real `aireplay-ng -9` injection test, ending with a `managed: ... \| injection: OK\|FAILED\|SKIPPED` summary |
+| **Comprehensive test suite** | `--test` flag: 20 checks incl. a real `aireplay-ng -9` injection test, ending with a `managed: OK\|FAILED \| injection: OK\|FAILED\|SKIPPED` summary |
 | **Clean uninstall** | `--uninstall` is manifest-driven (`/var/lib/mycowave/installed.files`) — removes only MycoWave-created files; `--remove-mok` also deletes MOK keys |
 | **ARM64/Pi support** | Auto-installs `kalipi-kernel-headers`, USB power tweaks |
 | **Secure Boot (MOK)** | `--secure-boot`: key gen, UEFI enrollment, DKMS signing (signing config persisted for kernel-upgrade rebuilds) |
@@ -69,15 +69,21 @@ After install, just **plug in the AWUS036ACH** — monitor mode starts automatic
 
 | Kernel Version | Strategy | Driver |
 |----------------|----------|--------|
-| **≥ 6.19** | `ac3rn` ⚠️ | Ac3rN patched DKMS — **experimental / unmaintained**. Upstream Ac3rN targets only 6.15/6.16/6.18; Kenji776's 6.19 fork is a tiny unguarded patch repo and no maintained out-of-tree driver supports 7.x. For managed use prefer `--force-method inkernel` |
-| **6.15 – 6.18** | `ac3rn` | Ac3rN patched DKMS (ccflags-y/radio_idx/timer, fixes timer/cfg80211 API) |
+| **≥ 6.19** (incl. 7.x) | `inkernel` | In-kernel `rtw_8812au` (mac80211). No maintained out-of-tree rtl8812au driver supports 6.19+/7.x, and Kali rolling drops headers for older kernels so a DKMS build is not possible. Managed + monitor mode; injection not guaranteed |
+| **6.15 – 6.18** | `ac3rn` | Ac3rN patched **source build** (`install_alfa_driver.sh`; supports only 6.15/6.16/6.18) |
 | **6.14** | `inkernel` | In-kernel `rtw_8812au` (mac80211) |
 | **6.6 – 6.13** | `kali-dkms` | Kali `realtek-rtl88xxau-dkms` package (frozen at 2025-03-30; hard-gated to ≤ 6.13) |
 | **< 6.6** | `lwfinger` | `lwfinger/rtw88` DKMS backport (managed mode; injection NOT guaranteed) |
 
-`aircrack-ng` is **no longer the automatic `< 6.6` default** — it remains available for
-injection workloads via `--force-method aircrack-ng`. Forcing `kali-dkms` on a kernel
-`> 6.13` is refused, because the frozen Kali package does not build on 6.15+.
+`ac3rn` and `aircrack-ng` are **not selected automatically** — they remain available only
+via `--force-method`. Forcing `kali-dkms` on a kernel `> 6.13` is refused, because the
+frozen Kali package does not build on 6.15+.
+
+All out-of-tree strategies (`kali-dkms`, `ac3rn`, `aircrack-ng`, `lwfinger`) require the
+build tree `/lib/modules/$(uname -r)/build`. If it is missing, the installer aborts the
+out-of-tree strategy early and points to `--force-method inkernel`. The
+`linux-headers-amd64` meta package is deliberately **not** auto-installed — it pulls a
+newer kernel image.
 
 Force a specific method:
 ```bash
@@ -90,9 +96,15 @@ sudo ./mycowave-install.sh --force-method lwfinger  # managed-mode rtw88 backpor
 The in-kernel `rtw88` stack (and the `lwfinger/rtw88` backport) works well in **managed
 mode**, but **packet injection is unreliable** — see upstream issues
 [#424](https://github.com/lwfinger/rtw88/issues/424)/[#428](https://github.com/lwfinger/rtw88/issues/428)/[#453](https://github.com/lwfinger/rtw88/issues/453)
-and a channel-pinning regression on kernels ≥ 6.9. For dependable `airodump-ng` /
-`aireplay-ng` captures, use an out-of-tree `88XXau` strategy (`ac3rn`, `kali-dkms`, or
-`aircrack-ng`).
+and a channel-pinning regression on kernels ≥ 6.9. This is why kernels ≥ 6.19 default to
+`inkernel` for managed/monitor use: no out-of-tree driver can be built there. For
+dependable `airodump-ng` / `aireplay-ng` captures, use an out-of-tree `88XXau` strategy
+(`ac3rn`, `kali-dkms`, or `aircrack-ng`) where one is available.
+
+Out-of-tree installs build the module **first** and only blacklist the in-kernel driver
+after a successful build. If the build fails, MycoWave removes any
+`/etc/modprobe.d/*.conf` containing `blacklist rtw_` and runs `update-initramfs -u`, so
+the working in-kernel driver is never left blacklisted.
 
 ---
 
@@ -210,7 +222,9 @@ sudo ./mycowave-install.sh --uninstall --remove-mok
 - Kali Linux 2024.x – 2026.1+ (or Debian-based with kernel 6.6+)
 - Root/sudo access
 - Internet connection (for packages/firmware)
-- Kernel headers (`linux-headers-$(uname -r)` or `kalipi-kernel-headers` on Pi)
+- Kernel build tree for out-of-tree strategies: `/lib/modules/$(uname -r)/build`
+  (the `linux-headers-amd64` meta package is **not** auto-installed — it pulls a newer
+  kernel image). Kernels ≥ 6.19 fall back to in-kernel `rtw88` when headers are absent.
 
 ---
 
@@ -220,7 +234,9 @@ sudo ./mycowave-install.sh --uninstall --remove-mok
 |-------|----------|
 | **Module won't load (Secure Boot)** | Run `mokutil --import` with generated MOK key, enroll on reboot |
 | **DKMS build fails on kernel 6.15+** | Use `--force-method ac3rn` (6.15–6.18) or `--force-method lwfinger` (managed) |
-| **`--force-method kali-dkms` refused** | The frozen Kali package only builds ≤ 6.13; use `ac3rn`/`lwfinger` instead |
+| **No headers/build tree (`/lib/modules/$(uname -r)/build`)** | Out-of-tree DKMS cannot build — use `--force-method inkernel` (default on ≥ 6.19) |
+| **Adapter disappears after a failed install** | The rollback should have cleared the blacklist; if not: `sudo rm -f /etc/modprobe.d/blacklist-rtw88.conf && sudo update-initramfs -u`, then `sudo ./mycowave-install.sh --force-method inkernel` |
+| **`--force-method kali-dkms` refused** | The frozen Kali package only builds ≤ 6.13; use `inkernel`/`ac3rn`/`lwfinger` instead |
 | **`rtw88` injection unreliable** | Expected: use an out-of-tree `88XXau` strategy (`ac3rn`/`kali-dkms`/`aircrack-ng`) |
 | **Monitor mode fails** | Run `sudo airmon-ng check kill` first |
 | **No 5GHz channels** | `sudo iw reg set BO` (or your country code) |
@@ -255,7 +271,7 @@ Built on the work of:
 - **[aircrack-ng/rtl8812au](https://github.com/aircrack-ng/rtl8812au)** — Monitor mode & injection foundation
 - **[morrownr/8812au-20210820](https://github.com/morrownr/8812au-20210820)** — Stable DKMS packaging
 - **[lwfinger/rtw88](https://github.com/lwfinger/rtw88)** — In-kernel driver (Linux 6.14+)
-- **[Ac3rN/realtek-rtl88xxau-auto-installer](https://github.com/Ac3rN/realtek-rtl88xxau-auto-installer)** — Kernel 6.15+ patches
+- **[Ac3rN/realtek-rtl88xxau-auto-installer](https://github.com/Ac3rN/realtek-rtl88xxau-auto-installer)** — Kernel 6.15–6.18 patches
 - **Kali Linux packaging team** — `realtek-rtl88xxau-dkms` package
 
 ---

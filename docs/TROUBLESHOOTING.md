@@ -41,7 +41,7 @@ sudo /usr/local/bin/mycowave-enroll-mok full
 
 **Solution**:
 ```bash
-# Use Ac3rN patched installer (6.15-6.18)
+# 6.15-6.18: use the Ac3rN patched source build (install_alfa_driver.sh)
 sudo ./mycowave-install.sh --force-method ac3rn
 
 # Or the managed-mode lwfinger/rtw88 backport (injection NOT guaranteed)
@@ -52,8 +52,25 @@ sudo apt install linux-image-6.13.0-kali-amd64
 ```
 
 > `--force-method kali-dkms` is **refused** on kernels `> 6.13` for this reason.
-> On `≥ 6.19` (incl. 7.x) `ac3rn` is experimental/unmaintained — prefer
-> `--force-method inkernel` for managed use.
+> On `≥ 6.19` (incl. 7.x) **no** maintained out-of-tree rtl8812au driver exists, so
+> `ac3rn` cannot be relied on either — the installer defaults to in-kernel `rtw88`
+> (`--force-method inkernel`) for managed/monitor use.
+
+### 2b. "Kernel headers are missing" / no build tree
+
+**Cause**: Out-of-tree strategies (`kali-dkms`, `ac3rn`, `aircrack-ng`, `lwfinger`)
+require `/lib/modules/$(uname -r)/build`. Kali rolling drops headers for older kernels,
+and the `linux-headers-amd64` meta package is deliberately **not** auto-installed because
+it pulls a newer kernel image.
+
+**Solution**:
+```bash
+# Use the in-kernel driver (default on >= 6.19)
+sudo ./mycowave-install.sh --force-method inkernel
+
+# If matching headers are actually available for this exact kernel:
+sudo apt install linux-headers-$(uname -r)
+```
 
 ### 3. "Monitor mode fails / interface not created"
 
@@ -185,6 +202,21 @@ iw dev wlan0 link
 echo 2 | sudo tee /sys/module/88XXau/parameters/rtw_switch_usb_mode
 ```
 
+### 11. "Adapter disappears after a failed out-of-tree install"
+
+**Cause**: A previous out-of-tree install left the in-kernel `rtw88` driver blacklisted.
+
+**Solution**: Out-of-tree installs now build first and only blacklist on success, rolling
+back any `blacklist rtw_` config on failure. If the adapter is still missing:
+```bash
+# Clear the stale blacklist and rebuild initramfs
+sudo rm -f /etc/modprobe.d/blacklist-rtw88.conf && sudo update-initramfs -u
+
+# Or restore the in-kernel driver
+sudo ./mycowave-install.sh --force-method inkernel
+# Reboot recommended
+```
+
 ---
 
 ## Raspberry Pi Specific
@@ -203,8 +235,8 @@ echo 2 | sudo tee /sys/module/88XXau/parameters/rtw_switch_usb_mode
 
 | Kernel | Auto Strategy | Reliable Injection | Notes |
 |--------|---------------|--------------------|-------|
-| ≥ 6.19 (incl. 7.x) | `ac3rn` ⚠️ | None guaranteed (unmaintained) | Experimental/unmaintained; prefer `inkernel` for managed use |
-| 6.15–6.18 | `ac3rn` | `ac3rn` / `aircrack-ng` | `kali-dkms` does not build here |
+| ≥ 6.19 (incl. 7.x) | `inkernel` | None guaranteed | No maintained out-of-tree driver; `rtw88` is managed/monitor only |
+| 6.15–6.18 | `ac3rn` | `ac3rn` / `aircrack-ng` | `kali-dkms` does not build here; `ac3rn` is a source build |
 | 6.14 | `inkernel` | `kali-dkms`* / `aircrack-ng` | `rtw88` managed only |
 | 6.6–6.13 | `kali-dkms` | `kali-dkms` / `aircrack-ng` | Kali package hard-gated to ≤ 6.13 |
 | < 6.6 | `lwfinger` | `aircrack-ng` | lwfinger is managed-mode only |
@@ -286,8 +318,9 @@ sudo ./mycowave-install.sh --uninstall
 sudo reboot
 sudo ./mycowave-install.sh --performance --secure-boot --watchdog --thermal
 
-# Force specific strategy
+# Force a specific strategy (ac3rn is 6.15-6.18 only; use inkernel on >= 6.19)
 sudo ./mycowave-install.sh --force-method ac3rn
+sudo ./mycowave-install.sh --force-method inkernel
 
 # Re-sign modules after kernel update
 sudo /usr/local/bin/mycowave-enroll-mok sign

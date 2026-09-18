@@ -31,6 +31,8 @@ ENABLE_COEX=false
 SKIP_CRASH_COLLECTOR=false
 RUN_TEST_SUITE=false
 REMOVE_MOK_KEYS=false
+# Set false when the running kernel has no build tree; DKMS strategies are skipped.
+KERNEL_HEADERS_AVAILABLE=true
 
 # Colors for output
 RED='\033[0;31m'
@@ -93,6 +95,20 @@ dry_write() {
 # ─── Utility Functions ──────────────────────────────────────────────────────
 require_root() {
     [[ $EUID -eq 0 ]] || { error "Run as root (sudo)"; exit 1; }
+}
+
+# Out-of-tree (DKMS) strategies need the build tree of the RUNNING kernel.
+# Kali rolling often drops headers for older kernels, so fail fast and clearly
+# instead of letting a downstream build/apt step produce a confusing error.
+require_kernel_headers() {
+    [[ "$DRY_RUN" == true ]] && return 0
+    if [[ ! -d "/lib/modules/$(uname -r)/build" ]]; then
+        error "Kernel headers for $(uname -r) are missing (/lib/modules/$(uname -r)/build)."
+        error "An out-of-tree DKMS driver cannot be built for this kernel."
+        error "Use the in-kernel driver instead: sudo $SCRIPT_NAME --force-method inkernel"
+        return 1
+    fi
+    return 0
 }
 
 detect_os() {
@@ -194,14 +210,14 @@ choose_strategy() {
     # Disjoint ranges — check highest first so lower branches are not shadowed.
     # Kernel >= 6.19 / 7.x: no maintained out-of-tree driver supports these.
     if (( KERNEL_MAJOR > 6 || (KERNEL_MAJOR == 6 && KERNEL_MINOR >= 19) )); then
-        STRATEGY="ac3rn"
+        STRATEGY="inkernel"
         warn "════════════════════════════════════════════════════════════════"
-        warn "  UNMAINTAINED PATH: kernel $KERNEL_VERSION ≥ 6.19"
-        warn "  Upstream Ac3rN targets only 6.16/6.18. Kenji776's 6.19 fork"
-        warn "  is a tiny unguarded patch repo, and NO maintained out-of-tree"
-        warn "  rtl8812au driver supports 7.x. Proceeding with ac3rn anyway."
-        warn "  For managed (non-injection) use prefer in-kernel rtw88:"
-        warn "      sudo $SCRIPT_NAME --force-method inkernel"
+        warn "  Kernel $KERNEL_VERSION ≥ 6.19 → using in-kernel rtw88 (managed)"
+        warn "  NO maintained out-of-tree rtl8812au driver supports 6.19+/7.x, and"
+        warn "  Kali usually ships no headers for older kernels, so DKMS builds are"
+        warn "  not possible. rtw88 supports managed + monitor mode; packet injection"
+        warn "  is NOT guaranteed. Only if matching headers exist, try:"
+        warn "      sudo $SCRIPT_NAME --force-method ac3rn"
         warn "════════════════════════════════════════════════════════════════"
         return
     fi
@@ -269,17 +285,17 @@ check_prerequisites() {
         fi
     else
         if ! dpkg-query -W -f='${Status}' "$headers_exact" 2>/dev/null | grep -q "ok installed"; then
-            local headers_meta="linux-headers-amd64"
-            if dpkg-query -W -f='${Status}' "$headers_meta" 2>/dev/null | grep -q "ok installed"; then
-                warn "$headers_exact not installed but $headers_meta is present — continuing (DKMS may still build)."
-            else
-                warn "$headers_exact missing; will try exact + meta headers (warn-only if unavailable)."
-                missing+=("$headers_exact")
-                # Meta package pulls headers for the running Kali kernel when the
-                # exact versioned package is not published.
-                missing+=("linux-headers-amd64")
-            fi
+            warn "$headers_exact is not installed."
+            warn "Kali rolling drops headers for older kernels; the 'linux-headers-amd64'"
+            warn "meta pulls a NEWER kernel image, so it is NOT auto-installed here."
         fi
+    fi
+
+    # Definitive DKMS prerequisite: build tree for the RUNNING kernel.
+    if [[ "$DRY_RUN" != true && ! -d "/lib/modules/$(uname -r)/build" ]]; then
+        KERNEL_HEADERS_AVAILABLE=false
+        warn "No build tree at /lib/modules/$(uname -r)/build — out-of-tree DKMS"
+        warn "drivers cannot be built for this kernel; use in-kernel rtw88 instead."
     fi
 
     # Helpful tools/binaries (warn-only, never fatal)
@@ -334,6 +350,8 @@ EOF
 install_kali_dkms() {
     log "Installing: Kali DKMS package (realtek-rtl88xxau-dkms)"
 
+    require_kernel_headers || return 1
+
     run "apt-get update -qq"
     run "apt-get install -y realtek-rtl88xxau-dkms realtek-rtl8814au-dkms"
 
@@ -358,7 +376,9 @@ EOF
 }
 
 install_ac3rn() {
-    log "Installing: Ac3rN patched DKMS (kernel 6.15+ fix)"
+    log "Installing: Ac3rN patched source build (kernel 6.15-6.18 fix)"
+
+    require_kernel_headers || return 1
 
     local repo="https://github.com/Ac3rN/realtek-rtl88xxau-auto-installer.git"
     local dir="/tmp/realtek-rtl88xxau-auto-installer"
@@ -386,7 +406,25 @@ install_ac3rn() {
     fi
     run "chmod +x '$entry'"
 
-    # Blacklist in-kernel driver (single write = idempotent)
+    # Build FIRST. Do not blacklist the working in-kernel driver until the
+    # out-of-tree module actually builds — otherwise a failed build leaves the
+    # adapter dead after reboot.
+    if ! run "bash '$entry'"; then
+        error "Ac3rN installer failed — rolling back so the in-kernel driver keeps working."
+        local f
+        for f in /etc/modprobe.d/*.conf; do
+            [[ -f "$f" ]] || continue
+            grep -qE '^[[:space:]]*blacklist[[:space:]]+rtw_' "$f" 2>/dev/null && run "rm -f '$f'"
+        done
+        run "rm -rf '$dir'"
+        run "update-initramfs -u"
+        error "Out-of-tree build unavailable on kernel $KERNEL_VERSION (missing/mismatched headers)."
+        error "The in-kernel rtw88 driver works for managed + monitor mode:"
+        error "    sudo $SCRIPT_NAME --force-method inkernel"
+        return 1
+    fi
+
+    # Build succeeded → blacklist in-kernel rtw88 so 88XXau binds the device.
     dry_write /etc/modprobe.d/blacklist-rtw88.conf <<'EOF'
 blacklist rtw_8812au
 blacklist rtw_8821au
@@ -396,8 +434,7 @@ EOF
     run "rm -f /etc/modprobe.d/blacklist-rtl88xxau.conf"
     run "update-initramfs -u"
 
-    run "bash '$entry'"
-
+    run "modprobe -r rtw_8812au" || true
     run "modprobe 88XXau"
     sleep 2
 
@@ -411,14 +448,29 @@ EOF
 install_aircrack_ng() {
     log "Installing: aircrack-ng rtl8812au (latest source)"
 
+    require_kernel_headers || return 1
+
     local repo="https://github.com/aircrack-ng/rtl8812au.git"
     local dir="/tmp/rtl8812au"
 
     run "rm -rf '$dir'"
     run "git clone --depth 1 '$repo' '$dir'"
-    run "cd '$dir'"
 
-    # Blacklist in-kernel driver (single write = idempotent)
+    # Build FIRST; only blacklist the working in-kernel driver on success.
+    local build_ok=true
+    if [[ -f "$dir/dkms-install.sh" ]]; then
+        run "'$dir/dkms-install.sh'" || build_ok=false
+    else
+        run "cd '$dir' && make dkms_install" || build_ok=false
+    fi
+    if [[ "$build_ok" != true ]]; then
+        error "aircrack-ng build failed — the in-kernel driver is left unblacklisted."
+        run "rm -rf '$dir'"
+        error "For managed use: sudo $SCRIPT_NAME --force-method inkernel"
+        return 1
+    fi
+
+    # Build succeeded → blacklist in-kernel rtw88 so 88XXau binds the device.
     dry_write /etc/modprobe.d/blacklist-rtw88.conf <<'EOF'
 blacklist rtw_8812au
 blacklist rtw_8821au
@@ -428,13 +480,7 @@ EOF
     run "rm -f /etc/modprobe.d/blacklist-rtl88xxau.conf"
     run "update-initramfs -u"
 
-    # Use DKMS install if available, else manual
-    if [[ -f "$dir/dkms-install.sh" ]]; then
-        run "'$dir/dkms-install.sh'"
-    else
-        run "make dkms_install"
-    fi
-
+    run "modprobe -r rtw_8812au" || true
     run "modprobe 88XXau"
     sleep 2
 
@@ -447,6 +493,8 @@ EOF
 
 install_lwfinger() {
     log "Installing: lwfinger/rtw88 backport (managed mode; injection NOT guaranteed)"
+
+    require_kernel_headers || return 1
 
     local repo="https://github.com/lwfinger/rtw88.git"
     local dir="/tmp/rtw88"

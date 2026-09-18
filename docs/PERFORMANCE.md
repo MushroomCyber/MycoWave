@@ -29,8 +29,8 @@ options <driver> rtw_country_code=BO
 ```
 
 Where `<driver>` is:
-- `88XXau` for DKMS drivers (kali-dkms, ac3rn, aircrack-ng) — the `rtw_*`
-  options below are DKMS-only and must NOT be applied to `rtw88` modules.
+- `88XXau` for out-of-tree drivers (kali-dkms, ac3rn, aircrack-ng) — the `rtw_*`
+  options below are invalid for `rtw88` modules and must NOT be applied to them.
 - In-kernel (`inkernel`) **and** the `lwfinger` backport use only `rtw88_*`
   options (e.g. `rtw88_core` `debug_mask`, `disable_lps_deep_mode`); DKMS-only
   opts are invalid there. The installer writes per-driver configs accordingly.
