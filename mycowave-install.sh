@@ -1158,6 +1158,21 @@ EOF
     success "DKMS auto-rebuild configured"
 }
 
+# Detect the real monitor-mode interface. Modern airmon-ng enables monitor mode
+# IN PLACE (keeping the original name) and does not necessarily create <iface>mon.
+# Prints the detected monitor interface, or the managed interface as a fallback
+# (in-place monitor mode / monitor not yet enabled). Never invents a name.
+detect_monitor_iface() {
+    local managed_iface="${1:-}"
+    local detected=""
+    detected=$(iw dev 2>/dev/null | awk '/Interface/{i=$2} /type monitor/{print i; exit}')
+    if [[ -n "$detected" ]]; then
+        printf '%s\n' "$detected"
+    else
+        printf '%s\n' "$managed_iface"
+    fi
+}
+
 # ─── Verification ───────────────────────────────────────────────────────────
 verify_install() {
     [[ "$SKIP_VERIFY" == true ]] && { info "Skipping verification"; return; }
@@ -1184,6 +1199,14 @@ verify_install() {
 
     info "Interface: $iface"
     info "Driver: $driver"
+
+    # Accept either a renamed or in-place monitor interface (resolved dynamically).
+    local mon_iface; mon_iface=$(detect_monitor_iface "$iface")
+    if [[ "$mon_iface" == "$iface" ]]; then
+        verbose "Monitor interface: $iface (in-place, once monitor mode is enabled)"
+    else
+        info "Monitor interface: $mon_iface"
+    fi
 
     # Check module loaded
     if ! lsmod | grep -qE '^(88XXau|rtw88_8812au)'; then
@@ -1264,29 +1287,37 @@ run_full_test_suite() {
     # Test 9: HT capabilities (802.11n)
     run_test "HT (802.11n) supported" "iw phy $phy info 2>/dev/null | grep -qi ht" || true
 
-    # Test 10: Monitor mode
+    # Test 10: Monitor mode. Modern airmon-ng enables monitor mode IN PLACE and
+    # may keep the original interface name instead of creating <iface>mon.
     run_test "Monitor mode works" "airmon-ng check kill >/dev/null 2>&1 && airmon-ng start $iface >/dev/null 2>&1" || true
 
-    # Test 11: Injection capability (monitor interface exists)
-    local mon="${iface}mon"
-    run_test "Monitor interface created ($mon)" "[[ -e /sys/class/net/$mon ]]" || true
+    # Test 11: Monitor interface present — accepts a renamed OR in-place monitor interface.
+    local mon_iface=""
+    local mon_is_monitor=false
+    mon_iface=$(iw dev 2>/dev/null | awk '/Interface/{i=$2} /type monitor/{print i; exit}')
+    if [[ -n "$mon_iface" && -e "/sys/class/net/$mon_iface" ]]; then
+        mon_is_monitor=true
+    else
+        mon_iface="$iface"   # in-place fallback for cleanup/guidance only
+    fi
+    run_test "Monitor interface present ($mon_iface)" "[[ '$mon_is_monitor' == true ]]" || true
 
     # Test 11b: Real injection capability via aireplay-ng (non-fatal).
-    if [[ ! -e "/sys/class/net/$mon" ]]; then
-        warn "Injection test SKIPPED (monitor interface $mon not present)"
+    if [[ "$mon_is_monitor" != true ]]; then
+        warn "Injection test SKIPPED (no monitor-mode interface found via 'iw dev')"
     elif ! command -v aireplay-ng >/dev/null 2>&1; then
         warn "Injection test SKIPPED (aireplay-ng not installed)"
-    elif aireplay-ng -9 "$mon" >/dev/null 2>&1; then
+    elif aireplay-ng -9 "$mon_iface" >/dev/null 2>&1; then
         inj_status="OK"
-        success "✓ Injection capability (aireplay-ng -9 $mon)"
+        success "✓ Injection capability (aireplay-ng -9 $mon_iface)"
     else
         inj_status="FAILED"
-        error "✗ Injection capability (aireplay-ng -9 $mon)"
+        error "✗ Injection capability (aireplay-ng -9 $mon_iface)"
         all_passed=false
     fi
 
     # Test 12: Cleanup monitor
-    run_test "Monitor cleanup works" "airmon-ng stop $mon >/dev/null 2>&1" || true
+    run_test "Monitor cleanup works" "airmon-ng stop $mon_iface >/dev/null 2>&1" || true
 
     # Test 13: USB device responsive
     run_test "USB device responsive" "lsusb -d 0bda:a811 2>/dev/null | grep -q Realtek" || true
@@ -1653,15 +1684,37 @@ main() {
 
     log "═══════════════════════════════════════════════════════════"
     success "Installation complete!"
-    info "Interface: wlan0 (monitor: wlan0mon)"
-    info "Monitor mode: Auto-enabled on plug/boot"
+
+    # Resolve the real interface names — never assume a fixed interface name.
+    # airmon-ng may enable monitor mode in place (same name) or rename it.
+    local final_iface=""
+    local final_mon=""
+    for i in /sys/class/net/wlan*; do
+        [[ -e "$i" ]] || continue
+        final_iface=$(basename "$i")
+        break
+    done
+    if [[ -n "$final_iface" ]]; then
+        final_mon=$(detect_monitor_iface "$final_iface")
+        info "Interface: $final_iface (monitor: $final_mon)"
+    else
+        info "Interface: no wlan* interface detected — check the adapter is plugged in"
+    fi
+    info "Monitor mode: Auto-enabled on plug/boot (airmon-ng may keep the same name)"
     info "5GHz channels: Enabled via regulatory domain $REG_DOMAIN"
     info "Log: $LOG_FILE"
     info ""
     info "Quick test:"
     info "  sudo airmon-ng check kill"
-    info "  sudo airmon-ng start wlan0"
-    info "  sudo airodump-ng wlan0mon"
+    if [[ -n "$final_iface" ]]; then
+        info "  sudo airmon-ng start $final_iface"
+        info "  iw dev   # note which interface is in monitor mode"
+        info "  sudo airodump-ng $final_mon"
+    else
+        info "  sudo airmon-ng start <iface>   # e.g. wlan0, adjust to your adapter"
+        info "  iw dev   # note which interface is in monitor mode"
+        info "  sudo airodump-ng <mon_iface>"
+    fi
     log "═══════════════════════════════════════════════════════════"
 }
 

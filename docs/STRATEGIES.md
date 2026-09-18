@@ -267,8 +267,9 @@ After installation, MycoWave verifies:
 
 1. **Module loaded**: `lsmod | grep -E '88XXau|rtw88_8812au'`
 2. **Interface exists**: `wlan0` in `/sys/class/net/`
-3. **Monitor mode works**: `airmon-ng start wlan0` → `wlan0mon`
-4. **Injection capable**: `aireplay-ng -9 wlan0mon` (real injection test; reported as
+3. **Monitor mode works**: `airmon-ng start wlan0`, then read the monitor interface from `iw dev`
+   (modern `airmon-ng` enables monitor mode **in place** and may keep `wlan0` instead of creating `wlan0mon`)
+4. **Injection capable**: `aireplay-ng -9 <mon_iface>` (real injection test; reported as
    `managed: OK|FAILED | injection: OK|FAILED|SKIPPED` in the `--test` summary)
 5. **5GHz channels**: `iw phy phy0 channels | grep 5xxx`
 

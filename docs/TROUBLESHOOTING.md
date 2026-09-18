@@ -84,8 +84,9 @@ sudo airmon-ng check kill
 # Then start monitor mode
 sudo airmon-ng start wlan0
 
-# Verify
-iw dev wlan0mon info | grep monitor
+# Verify — modern airmon-ng may enable monitor mode in place, so confirm the name first
+iw dev
+iw dev <mon_iface> info | grep monitor
 ```
 
 ### 4. "No 5GHz channels showing"
@@ -127,12 +128,15 @@ strategy (`inkernel`/`lwfinger`), where injection is not guaranteed.
 
 **Solution**:
 ```bash
-# Use monitor interface, not wlan0
-sudo aireplay-ng -9 wlan0mon
+# Confirm the monitor interface first — modern airmon-ng may keep the original name
+iw dev
+
+# Use the monitor interface (not the managed one) for injection
+sudo aireplay-ng -9 <mon_iface>
 
 # Move closer to AP
-# Check injection capability
-iw dev wlan0mon info | grep -i monitor
+# Check monitor capability
+iw dev <mon_iface> info | grep -i monitor
 ```
 
 For reliable `airodump-ng`/`aireplay-ng`, use an out-of-tree `88XXau` strategy
@@ -328,5 +332,6 @@ sudo /usr/local/bin/mycowave-enroll-mok sign
 # Manual monitor mode
 sudo airmon-ng check kill
 sudo airmon-ng start wlan0
-sudo airodump-ng wlan0mon
+iw dev   # note the interface in monitor mode (airmon-ng may keep wlan0)
+sudo airodump-ng <mon_iface>
 ```

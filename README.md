@@ -61,7 +61,7 @@ sudo ./mycowave-install.sh --dry-run
 sudo ./mycowave-install.sh --force-method lwfinger
 ```
 
-After install, just **plug in the AWUS036ACH** — monitor mode starts automatically on `wlan0mon`.
+After install, just **plug in the AWUS036ACH** — monitor mode starts automatically. Modern `airmon-ng` enables monitor mode **in place** (the interface may keep its original name instead of becoming `wlan0mon`), so confirm the actual monitor interface with `iw dev`.
 
 ---
 
@@ -189,11 +189,15 @@ rtw_country_code=BO
 sudo airmon-ng check kill
 sudo airmon-ng start wlan0
 
-# Packet capture
-sudo airodump-ng wlan0mon
+# Confirm the monitor interface. Modern airmon-ng may keep the original name
+# (wlan0) instead of creating wlan0mon — look for "type monitor" in iw dev.
+iw dev
 
-# Injection test
-sudo aireplay-ng -9 wlan0mon
+# Packet capture (use the monitor interface shown by iw dev above)
+sudo airodump-ng wlan0mon   # or wlan0 when monitor mode is in-place
+
+# Injection test (same monitor interface)
+sudo aireplay-ng -9 wlan0mon   # or wlan0
 
 # Check 5GHz channels
 iw phy phy0 channels | grep -A1 "5[0-9][0-9][0-9]"
