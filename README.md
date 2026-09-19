@@ -24,13 +24,13 @@ MycoWave is a version-aware, zero-intervention installer for the **Alpha AWUS036
 | **Smart strategy selection** | Disjoint ranges: `lwfinger` < 6.6, Kali DKMS 6.6–6.13, in-kernel `rtw88` on 6.14 and ≥ 6.19, Ac3rN source build 6.15–6.18 |
 | **Managed vs injection** | Out-of-tree `88XXau` (ac3rn/kali-dkms/aircrack-ng) for reliable injection; in-kernel `rtw88`/`lwfinger` for managed use |
 | **Driver conflict resolution** | Auto-blacklists competing drivers (DKMS vs in-kernel) |
-| **Monitor mode automation** | udev rules + NetworkManager dispatcher + systemd service |
+| **Monitor mode (non-destructive)** | Stable `awus036ach` udev symlink + manual `mycowave-monitor-mode` helper; boot-time service/dispatcher are opt-in via `--monitor-service` |
 | **Performance optimizations** | `--performance` flag: USB2 force, powersave disable, TX power max, 5GHz unlock |
 | **Firmware updates** | Auto-copies latest `rtw88xx_fw.bin` from `linux-firmware` |
 | **DKMS auto-rebuild** | Initramfs hook + systemd service for kernel upgrades |
 | **Post-install verification** | Module load, monitor mode, injection capability, 5GHz channels |
-| **Comprehensive test suite** | `--test` flag: 20 checks incl. a real `aireplay-ng -9` injection test, ending with a `managed: OK\|FAILED \| injection: OK\|FAILED\|SKIPPED` summary |
-| **Clean uninstall** | `--uninstall` is manifest-driven (`/var/lib/mycowave/installed.files`) — removes only MycoWave-created files; `--remove-mok` also deletes MOK keys |
+| **Comprehensive test suite** | `--test` flag: 20 checks incl. a real `aireplay-ng -9` injection test, ending with a `managed: OK\|FAILED \| injection: OK\|FAILED\|SKIPPED` summary (no-op under `--dry-run`) |
+| **Clean uninstall** | `--uninstall` is manifest-driven (`/var/lib/mycowave/installed.files`) — removes only MycoWave-created files and MycoWave-recorded packages; never clobbers a package-owned `/etc/default/crda`. `--remove-mok` also deletes MOK keys |
 | **ARM64/Pi support** | Auto-installs `kalipi-kernel-headers`, USB power tweaks |
 | **Secure Boot (MOK)** | `--secure-boot`: key gen, UEFI enrollment, DKMS signing (signing config persisted for kernel-upgrade rebuilds) |
 | **Self-healing watchdog** | `--watchdog`: health checks, USB reset, driver reload, crash detection |
@@ -61,7 +61,7 @@ sudo ./mycowave-install.sh --dry-run
 sudo ./mycowave-install.sh --force-method lwfinger
 ```
 
-After install, just **plug in the AWUS036ACH** — monitor mode starts automatically. Modern `airmon-ng` enables monitor mode **in place** (the interface may keep its original name instead of becoming `wlan0mon`), so confirm the actual monitor interface with `iw dev`.
+After install, just **plug in the AWUS036ACH** and run `sudo mycowave-monitor-mode` for a ready-to-use monitor interface (modern `airmon-ng` may keep the original name — confirm with `iw dev`). Boot-time monitor automation is opt-in via `--monitor-service`.
 
 ---
 
@@ -120,7 +120,8 @@ Options:
   --force-method METHOD  Force install method: inkernel|lwfinger|kali-dkms|ac3rn|aircrack-ng
                          (kali-dkms is refused on kernels > 6.13)
   --skip-verify          Skip post-install verification
-  --skip-monitor         Skip automatic monitor mode setup
+  --skip-monitor         Skip all monitor automation (symlink rule, helper, dispatcher, service)
+  --monitor-service      Opt-in: install boot-time monitor service/dispatcher (kills NetworkManager)
   --reg-domain CODE      Regulatory domain for 5GHz (default: BO)
   --performance          Enable performance optimizations
   --skip-firmware        Skip firmware update check
@@ -131,7 +132,8 @@ Options:
   --coex                 Configure Bluetooth coexistence
   --skip-crash-collector Skip crash dump collector installation
   --test                 Run comprehensive test suite after install (includes real
-                         aireplay-ng -9 injection check; implies --skip-verify)
+                         aireplay-ng -9 injection check; implies --skip-verify;
+                         no-op under --dry-run)
   --remove-mok           Also delete MOK keys on --uninstall (UEFI enrollment remains)
   --help, -h             Show this help
 ```
@@ -167,12 +169,14 @@ rtw_country_code=BO
 ├── /etc/modprobe.d/
 │   ├── blacklist-rtl88xxau.conf      # Or blacklist-rtw88.conf
 │   ├── awus036ach-performance.conf   # (with --performance)
+├── /usr/local/bin/
+│   └── mycowave-monitor-mode         # Manual monitor helper (resolves + prints iface)
 ├── /etc/udev/rules.d/
-│   └── 90-awus036ach.rules           # Consistent wlan0 naming
+│   └── 90-awus036ach.rules           # Stable "awus036ach" symlink (no rename)
 ├── /etc/NetworkManager/dispatcher.d/
-│   └── 99-awus036ach-monitor         # Auto monitor on plug
+│   └── 99-awus036ach-monitor         # (only with --monitor-service)
 ├── /etc/systemd/system/
-│   └── awus036ach-monitor.service    # Boot-time monitor mode
+│   └── awus036ach-monitor.service    # (only with --monitor-service)
 ├── /etc/initramfs-tools/scripts/init-top/
 │   └── awus036ach                     # Early driver load
 ├── /lib/firmware/rtlwifi/
@@ -185,9 +189,13 @@ rtw_country_code=BO
 ## Post-Install Usage
 
 ```bash
-# Manual monitor mode (if auto didn't trigger)
+# Easiest: the helper installed by MycoWave resolves the adapter, enables
+# monitor mode, and prints the real monitor interface.
+sudo mycowave-monitor-mode
+
+# Manual equivalent
 sudo airmon-ng check kill
-sudo airmon-ng start wlan0
+sudo airmon-ng start wlan0   # or the stable "awus036ach" symlink
 
 # Confirm the monitor interface. Modern airmon-ng may keep the original name
 # (wlan0) instead of creating wlan0mon — look for "type monitor" in iw dev.
@@ -211,7 +219,9 @@ iw phy phy0 channels | grep -A1 "5[0-9][0-9][0-9]"
 ## Uninstall
 
 ```bash
-# Removes only files recorded in /var/lib/mycowave/installed.files
+# Removes only files recorded in /var/lib/mycowave/installed.files, and purges
+# only DKMS packages MycoWave itself recorded as installed. A package-owned
+# /etc/default/crda is never deleted (dpkg ownership is checked).
 sudo ./mycowave-install.sh --uninstall
 # Reboot recommended
 
@@ -242,7 +252,7 @@ sudo ./mycowave-install.sh --uninstall --remove-mok
 | **Adapter disappears after a failed install** | The rollback should have cleared the blacklist; if not: `sudo rm -f /etc/modprobe.d/blacklist-rtw88.conf && sudo update-initramfs -u`, then `sudo ./mycowave-install.sh --force-method inkernel` |
 | **`--force-method kali-dkms` refused** | The frozen Kali package only builds ≤ 6.13; use `inkernel`/`ac3rn`/`lwfinger` instead |
 | **`rtw88` injection unreliable** | Expected: use an out-of-tree `88XXau` strategy (`ac3rn`/`kali-dkms`/`aircrack-ng`) |
-| **Monitor mode fails** | Run `sudo airmon-ng check kill` first |
+| **Monitor mode fails** | Run `sudo mycowave-monitor-mode` (prints the real interface); boot-time automation is opt-in via `--monitor-service` |
 | **No 5GHz channels** | `sudo iw reg set BO` (or your country code) |
 | **ARM64/Pi build fails** | Ensure `kalipi-kernel-headers` installed |
 | **USB disconnects** | Add `dwc_otg.fiq_fsm_enable=0` to `/boot/config.txt` (Pi) |
@@ -256,6 +266,8 @@ MycoWave/
 ├── mycowave-install.sh      # Main installer script
 ├── README.md                # This file
 ├── LICENSE                  # MIT License
+├── .github/workflows/
+│   └── lint.yml             # CI Lint: bash -n + shellcheck --severity=error
 ├── docs/
 │   ├── STRATEGIES.md        # Driver strategy details
 │   ├── PERFORMANCE.md       # Performance tuning guide
@@ -264,8 +276,27 @@ MycoWave/
 └── scripts/
     ├── enroll-mok.sh        # MOK enrollment helper
     ├── wifi-watchdog.sh     # Self-healing watchdog
-    └── collect-crash.sh     # Debug crash dump collector
+    ├── collect-crash.sh     # Debug crash dump collector
+    └── lint.sh              # Local lint runner (bash -n + shellcheck)
 ```
+
+---
+
+## Development
+
+There is no local runtime/test step — install behaviour needs a root Kali box with the adapter attached.
+Static checks are:
+
+```bash
+# bash -n over all shell files + shellcheck when available
+./scripts/lint.sh
+
+# Raise the shellcheck severity (default: warning)
+SHELLCHECK_SEVERITY=error ./scripts/lint.sh
+```
+
+CI is a single GitHub Actions **Lint** workflow (`.github/workflows/lint.yml`) that runs `bash -n` plus
+`shellcheck --severity=error` on push and pull_request.
 
 ---
 

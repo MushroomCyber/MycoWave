@@ -129,7 +129,9 @@ sign_dkms_modules() {
     local sign_tool=""
 
     # Find sign-file script
-    if [[ -x "/usr/src/linux-headers-${kernel_ver}/scripts/sign-file" ]]; then
+    if [[ -x "/lib/modules/${kernel_ver}/build/scripts/sign-file" ]]; then
+        sign_tool="/lib/modules/${kernel_ver}/build/scripts/sign-file"
+    elif [[ -x "/usr/src/linux-headers-${kernel_ver}/scripts/sign-file" ]]; then
         sign_tool="/usr/src/linux-headers-${kernel_ver}/scripts/sign-file"
     elif command -v kmodsign >/dev/null 2>&1; then
         sign_tool="kmodsign"
@@ -155,7 +157,7 @@ sign_dkms_modules() {
 
         local mod_dir="/var/lib/dkms/${name}/${version}/${kern}/${arch}/module"
         if [[ -d "$mod_dir" ]]; then
-            for ko in "$mod_dir"/*.ko; do
+            for ko in "$mod_dir"/*.ko*; do
                 [[ -f "$ko" ]] || continue
                 log "Signing: $ko"
                 if "$sign_tool" sha256 "$MOK_KEY" "$MOK_CERT" "$ko" 2>/dev/null; then
@@ -251,7 +253,7 @@ main() {
             ;;
         status)
             require_root
-            check_secure_boot
+            check_secure_boot || true
             show_status
             ;;
         full)

@@ -14,12 +14,17 @@ SCRIPT_NAME="mycowave-install"
 LOG_FILE="/var/log/${SCRIPT_NAME}.log"
 MANIFEST_DIR="/var/lib/mycowave"
 MANIFEST_FILE="$MANIFEST_DIR/installed.files"
+PKG_MANIFEST_FILE="$MANIFEST_DIR/installed.packages"
+# Root of the repo checkout — used for ALL bundled-script lookups so a stray
+# `cd` in a strategy can never break later ${BASH_SOURCE}-relative paths.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DRY_RUN=false
 VERBOSE=false
 UNINSTALL=false
 FORCE_METHOD=""
 SKIP_VERIFY=false
 SKIP_MONITOR_SETUP=false
+ENABLE_MONITOR_SERVICE=false
 REG_DOMAIN="BO"  # Bolivia - permissive for 5GHz channels
 ENABLE_PERFORMANCE=false
 SKIP_FIRMWARE_UPDATE=false
@@ -59,7 +64,15 @@ warn()    { _log_emit "${YELLOW}[WARN]${NC} $*"; }
 error()   { _log_emit "${RED}[ERROR]${NC} $*"; }
 success() { _log_emit "${GREEN}[OK]${NC} $*"; }
 verbose() { [[ "$VERBOSE" == true ]] && log "$*" || true; }
-run()     { verbose "→ $*"; [[ "$DRY_RUN" == true ]] || eval "$*"; }
+run() {
+    if [[ "$DRY_RUN" == true ]]; then
+        info "[dry-run] $*"
+        return 0
+    fi
+    verbose "→ $*"
+    eval "$*"
+}
+pause()   { [[ "$DRY_RUN" == true ]] || sleep "${1:-2}"; }
 # Artifact manifest: only files MycoWave itself creates are recorded, so
 # --uninstall never deletes package-owned files (e.g. /etc/default/crda or
 # linux-firmware blobs under /lib/firmware/rtlwifi/).
@@ -77,6 +90,23 @@ manifest_add() {
 manifest_has() {
     local path="$1"
     [[ -f "$MANIFEST_FILE" ]] && grep -qxF "$path" "$MANIFEST_FILE" 2>/dev/null
+}
+
+# Record a package MycoWave itself installed, so --uninstall purges only those.
+manifest_add_pkg() {
+    local pkg="$1"
+    [[ -n "$pkg" ]] || return 0
+    if [[ "$DRY_RUN" == true ]]; then
+        info "[dry-run] would record package $pkg in $PKG_MANIFEST_FILE"
+        return 0
+    fi
+    mkdir -p "$MANIFEST_DIR"
+    grep -qxF "$pkg" "$PKG_MANIFEST_FILE" 2>/dev/null || printf '%s\n' "$pkg" >> "$PKG_MANIFEST_FILE"
+}
+
+manifest_has_pkg() {
+    local pkg="$1"
+    [[ -f "$PKG_MANIFEST_FILE" ]] && grep -qxF "$pkg" "$PKG_MANIFEST_FILE" 2>/dev/null
 }
 
 # Centralized file writer: respects DRY_RUN. Usage: dry_write DEST <<EOF ... EOF
@@ -306,7 +336,7 @@ check_prerequisites() {
 
     if [[ ${#missing[@]} -gt 0 ]]; then
         info "Installing missing packages: ${missing[*]}"
-        run "apt-get update -qq"
+        run "apt-get update -qq" || warn "apt-get update failed - continuing."
         if [[ "$DRY_RUN" == true ]]; then
             verbose "→ apt-get install -y ${missing[*]}"
         else
@@ -334,20 +364,20 @@ EOF
 
     # Ensure rtw88 is not blacklisted
     run "rm -f /etc/modprobe.d/blacklist-rtw88.conf"
-    run "update-initramfs -u"
+    run "update-initramfs -u" || warn "update-initramfs failed - continuing."
 
     # Load module. Never abort on failure: the module may be absent on this
     # kernel, or already loaded/bound on a re-run. Give actionable guidance.
     if [[ "$DRY_RUN" != true ]] && ! modinfo rtw88_8812au >/dev/null 2>&1; then
-        error "rtw88_8812au is NOT available in /lib/modules/$(uname -r)."
-        error "Kernel $KERNEL_VERSION may not ship the driver, or the matching"
-        error "linux-modules package is not installed. Check: modinfo rtw88_8812au"
-        error "If unavailable, boot a kernel that provides it (e.g. 6.19.x) or"
-        error "install headers for this kernel and use --force-method ac3rn."
-        return 1
+        warn "rtw88_8812au is NOT available in /lib/modules/$(uname -r)."
+        warn "Kernel $KERNEL_VERSION may not ship the driver, or the matching"
+        warn "linux-modules package is not installed. Check: modinfo rtw88_8812au"
+        warn "If unavailable, boot a kernel that provides it (e.g. 6.19.x) or"
+        warn "install headers for this kernel and use --force-method ac3rn."
+        warn "Continuing without loading (installation is not aborted)."
     fi
     run "modprobe rtw88_8812au" || true
-    sleep 2
+    pause 2
 
     # Verify (skipped in dry-run: module load is simulated)
     if [[ "$DRY_RUN" != true ]]; then
@@ -365,7 +395,15 @@ install_kali_dkms() {
 
     require_kernel_headers || return 1
 
-    run "apt-get update -qq"
+    # Record only packages MycoWave actually installs (absent beforehand), so
+    # --uninstall can purge exactly those and never touch user-installed ones.
+    local kali_pkgs=(realtek-rtl88xxau-dkms realtek-rtl8814au-dkms)
+    local p=""
+    for p in "${kali_pkgs[@]}"; do
+        dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q "ok installed" || manifest_add_pkg "$p"
+    done
+
+    run "apt-get update -qq" || warn "apt-get update failed - continuing."
     run "apt-get install -y realtek-rtl88xxau-dkms realtek-rtl8814au-dkms"
 
     # Blacklist in-kernel driver to prevent conflict (single write = idempotent)
@@ -376,10 +414,10 @@ blacklist rtw88_8814au
 EOF
     # Clear the blacklist created by install_inkernel so the DKMS module can load
     run "rm -f /etc/modprobe.d/blacklist-rtl88xxau.conf"
-    run "update-initramfs -u"
+    run "update-initramfs -u" || warn "update-initramfs failed - continuing."
 
     run "modprobe 88XXau"
-    sleep 2
+    pause 2
 
     # Verify (skipped in dry-run: module load is simulated)
     if [[ "$DRY_RUN" != true ]]; then
@@ -424,13 +462,20 @@ install_ac3rn() {
     # adapter dead after reboot.
     if ! run "bash '$entry'"; then
         error "Ac3rN installer failed — rolling back so the in-kernel driver keeps working."
-        local f
-        for f in /etc/modprobe.d/*.conf; do
-            [[ -f "$f" ]] || continue
-            grep -qE '^[[:space:]]*blacklist[[:space:]]+rtw_' "$f" 2>/dev/null && run "rm -f '$f'"
-        done
+        # Restrict rollback to the blacklist file we own plus manifest-listed
+        # modprobe configs — never blanket-delete other packages' files.
+        run "rm -f /etc/modprobe.d/blacklist-rtw88.conf"
+        if [[ -f "$MANIFEST_FILE" ]]; then
+            local mf=""
+            while IFS= read -r mf; do
+                [[ -n "$mf" ]] || continue
+                case "$mf" in
+                    /etc/modprobe.d/*.conf) run "rm -f '$mf'" ;;
+                esac
+            done < "$MANIFEST_FILE"
+        fi
         run "rm -rf '$dir'"
-        run "update-initramfs -u"
+        run "update-initramfs -u" || warn "update-initramfs failed - continuing."
         error "Out-of-tree build unavailable on kernel $KERNEL_VERSION (missing/mismatched headers)."
         error "The in-kernel rtw88 driver works for managed + monitor mode:"
         error "    sudo $SCRIPT_NAME --force-method inkernel"
@@ -445,11 +490,11 @@ blacklist rtw88_8814au
 EOF
     # Clear the blacklist created by install_inkernel so the DKMS module can load
     run "rm -f /etc/modprobe.d/blacklist-rtl88xxau.conf"
-    run "update-initramfs -u"
+    run "update-initramfs -u" || warn "update-initramfs failed - continuing."
 
     run "modprobe -r rtw88_8812au" || true
     run "modprobe 88XXau"
-    sleep 2
+    pause 2
 
     # Verify (skipped in dry-run: module load is simulated)
     if [[ "$DRY_RUN" != true ]]; then
@@ -474,7 +519,7 @@ install_aircrack_ng() {
     if [[ -f "$dir/dkms-install.sh" ]]; then
         run "'$dir/dkms-install.sh'" || build_ok=false
     else
-        run "cd '$dir' && make dkms_install" || build_ok=false
+        run "( cd '$dir' && make dkms_install )" || build_ok=false
     fi
     if [[ "$build_ok" != true ]]; then
         error "aircrack-ng build failed — the in-kernel driver is left unblacklisted."
@@ -491,11 +536,11 @@ blacklist rtw88_8814au
 EOF
     # Clear the blacklist created by install_inkernel so the DKMS module can load
     run "rm -f /etc/modprobe.d/blacklist-rtl88xxau.conf"
-    run "update-initramfs -u"
+    run "update-initramfs -u" || warn "update-initramfs failed - continuing."
 
     run "modprobe -r rtw88_8812au" || true
     run "modprobe 88XXau"
-    sleep 2
+    pause 2
 
     # Verify (skipped in dry-run: module load is simulated)
     if [[ "$DRY_RUN" != true ]]; then
@@ -518,9 +563,30 @@ install_lwfinger() {
     # Repo ships CRLF dkms.conf — normalize before dkms reads it.
     run "sed -i 's/\r\$//' '$dir/dkms.conf'"
 
-    # Build + register the rtw88 DKMS module.
-    run "cd '$dir' && dkms install \"\$PWD\""
-    run "make -C '$dir' install_fw"
+    # Build FIRST (subshell so the cd never leaks into later SCRIPT_DIR lookups).
+    # Only blacklist the working in-kernel driver once the module actually builds.
+    local build_ok=true
+    run "( cd '$dir' && dkms install \"\$PWD\" )" || build_ok=false
+    if [[ "$build_ok" == true ]]; then
+        run "( cd '$dir' && make install_fw )" || build_ok=false
+    fi
+    if [[ "$build_ok" != true ]]; then
+        error "lwfinger/rtw88 DKMS build failed — the in-kernel driver is left unblacklisted."
+        run "dkms remove -m rtw88 -v all --all 2>/dev/null || true"
+        run "rm -rf '$dir'"
+        run "update-initramfs -u" || warn "update-initramfs failed - continuing."
+        error "Out-of-tree rtw88 build unavailable on kernel $KERNEL_VERSION (missing/mismatched headers)."
+        error "The in-kernel rtw88 driver works for managed + monitor mode:"
+        error "    sudo $SCRIPT_NAME --force-method inkernel"
+        return 1
+    fi
+
+    # Record firmware copied by 'make install_fw' so uninstall can remove it.
+    local fw=""
+    for fw in /lib/firmware/rtw88/*.bin; do
+        [[ -e "$fw" ]] || continue
+        manifest_add "$fw"
+    done
 
     # Ship the module options file as-is, then blacklist the opposing DKMS driver.
     run "cp -f '$dir/rtw88.conf' /etc/modprobe.d/rtw88.conf"
@@ -534,10 +600,11 @@ EOF
 
     # Ensure rtw88 is not blacklisted (e.g. left over from a prior DKMS install).
     run "rm -f /etc/modprobe.d/blacklist-rtw88.conf"
-    run "update-initramfs -u"
+    run "update-initramfs -u" || warn "update-initramfs failed - continuing."
 
-    run "modprobe rtw88_8812au"
-    sleep 2
+    run "modprobe -r rtw88_8812au 2>/dev/null || true"
+    run "modprobe rtw88_8812au" || true
+    pause 2
 
     # Verify (skipped in dry-run: module load is simulated)
     if [[ "$DRY_RUN" != true ]]; then
@@ -608,48 +675,31 @@ update_firmware() {
 
     log "Checking for firmware updates..."
 
-    local fw_dir="/lib/firmware/rtlwifi"
-    local fw_files=("rtw8812a_fw.bin" "rtw8821a_fw.bin" "rtw8812b_fw.bin")
+    local fw_dir="/lib/firmware/rtw88"
+    local fw_files=("rtw8812a_fw.bin" "rtw8821a_fw.bin")
     local updated=false
 
     run "mkdir -p '$fw_dir'"
 
-    # Check if linux-firmware package has newer files
-    if dpkg-query -W -f='${Status}' linux-firmware 2>/dev/null | grep -q "ok installed"; then
-        local installed_version=$(dpkg-query -W -f='${Version}' linux-firmware 2>/dev/null || echo "unknown")
-        verbose "linux-firmware version: $installed_version"
-
-        # Copy firmware if available in package (cmp reads are safe;
-        # all writes go through run() so DRY_RUN changes nothing).
-        for fw in "${fw_files[@]}"; do
+    # rtw88 blobs live under /lib/firmware/rtw88 (linux-firmware). Some distros
+    # stage them under /usr/lib/firmware/rtw88; copy into place when they differ.
+    local fw=""
+    local fw_src=""
+    for fw in "${fw_files[@]}"; do
+        for fw_src in "/usr/lib/firmware/rtw88/$fw" "/lib/firmware/$fw"; do
+            [[ -f "$fw_src" ]] || continue
             if [[ "$DRY_RUN" == true ]]; then
-                verbose "[dry-run] would compare/copy /lib/firmware/$fw → $fw_dir/"
+                verbose "[dry-run] would compare/copy $fw_src → $fw_dir/"
                 continue
             fi
-            if [[ -f "/lib/firmware/$fw" ]] && ! cmp -s "/lib/firmware/$fw" "$fw_dir/$fw" 2>/dev/null; then
-                run "cp -f '/lib/firmware/$fw' '$fw_dir/'"
+            if ! cmp -s "$fw_src" "$fw_dir/$fw" 2>/dev/null; then
+                run "cp -f '$fw_src' '$fw_dir/'"
                 manifest_add "$fw_dir/$fw"
                 updated=true
-                info "Updated firmware: $fw"
+                info "Updated firmware: $fw (from $fw_src)"
             fi
         done
-    fi
-
-    # Also check for rtw88 firmware in /usr/lib/firmware (some distros)
-    if [[ -d "/usr/lib/firmware/rtlwifi" ]]; then
-        for fw in "${fw_files[@]}"; do
-            if [[ "$DRY_RUN" == true ]]; then
-                verbose "[dry-run] would compare/copy /usr/lib/firmware/rtlwifi/$fw → $fw_dir/"
-                continue
-            fi
-            if [[ -f "/usr/lib/firmware/rtlwifi/$fw" ]] && ! cmp -s "/usr/lib/firmware/rtlwifi/$fw" "$fw_dir/$fw" 2>/dev/null; then
-                run "cp -f '/usr/lib/firmware/rtlwifi/$fw' '$fw_dir/'"
-                manifest_add "$fw_dir/$fw"
-                updated=true
-                info "Updated firmware: $fw (from /usr/lib/firmware)"
-            fi
-        done
-    fi
+    done
 
     if [[ "$updated" == true ]]; then
         success "Firmware updated - reload driver or reboot to apply"
@@ -681,7 +731,7 @@ setup_secure_boot() {
     fi
 
     # Install enroll-mok script
-    local script_src="$(dirname "${BASH_SOURCE[0]}")/scripts/enroll-mok.sh"
+    local script_src="$SCRIPT_DIR/scripts/enroll-mok.sh"
     local script_dst="/usr/local/bin/mycowave-enroll-mok"
 
     if [[ -f "$script_src" ]]; then
@@ -818,7 +868,7 @@ setup_pi_optimizations() {
     log "Setting up Raspberry Pi / ARM64 optimizations..."
 
     # Install apply-pi-optimizations script
-    local script_src="$(dirname "${BASH_SOURCE[0]}")/scripts/apply-pi-optimizations.sh"
+    local script_src="$SCRIPT_DIR/scripts/apply-pi-optimizations.sh"
     local script_dst="/usr/local/bin/mycowave-pi-optimizations"
 
     if [[ -f "$script_src" ]]; then
@@ -847,7 +897,7 @@ setup_watchdog() {
     log "Setting up self-healing watchdog..."
 
     # Install watchdog script
-    local script_src="$(dirname "${BASH_SOURCE[0]}")/scripts/wifi-watchdog.sh"
+    local script_src="$SCRIPT_DIR/scripts/wifi-watchdog.sh"
     local script_dst="/usr/local/bin/wifi-watchdog"
 
     if [[ -f "$script_src" ]]; then
@@ -860,7 +910,7 @@ setup_watchdog() {
     fi
 
     # Install systemd service
-    local svc_src="$(dirname "${BASH_SOURCE[0]}")/scripts/mycowave-watchdog.service"
+    local svc_src="$SCRIPT_DIR/scripts/mycowave-watchdog.service"
     local svc_dst="/etc/systemd/system/mycowave-watchdog.service"
 
     if [[ -f "$svc_src" ]]; then
@@ -872,7 +922,7 @@ setup_watchdog() {
     fi
 
     # Install NetworkManager dispatcher
-    local nm_src="$(dirname "${BASH_SOURCE[0]}")/scripts/99-mycowave-wifi-recover"
+    local nm_src="$SCRIPT_DIR/scripts/99-mycowave-wifi-recover"
     local nm_dst="/etc/NetworkManager/dispatcher.d/99-mycowave-wifi-recover"
 
     if [[ -f "$nm_src" ]]; then
@@ -907,7 +957,7 @@ setup_thermal() {
     log "Setting up thermal monitoring..."
 
     # Install thermal monitor script
-    local script_src="$(dirname "${BASH_SOURCE[0]}")/scripts/thermal-monitor.sh"
+    local script_src="$SCRIPT_DIR/scripts/thermal-monitor.sh"
     local script_dst="/usr/local/bin/thermal-monitor"
 
     if [[ -f "$script_src" ]]; then
@@ -946,7 +996,7 @@ setup_coex() {
         kali-dkms|ac3rn|aircrack-ng) driver_module="88XXau" ;;
     esac
 
-    local coex_src="$(dirname "${BASH_SOURCE[0]}")/scripts/mycowave-coex.conf"
+    local coex_src="$SCRIPT_DIR/scripts/mycowave-coex.conf"
 
     if [[ "$STRATEGY" == "inkernel" || "$STRATEGY" == "lwfinger" ]]; then
         # rtw88 (in-kernel/lwfinger) exposes a runtime coex parameter — emit it ACTIVE.
@@ -999,8 +1049,11 @@ setup_crash_collector() {
 
     log "Setting up crash dump collector..."
 
+    # Create the output directory now so ProtectSystem=strict can write to it.
+    run "mkdir -p /var/log/mycowave-crashes"
+
     # Install collect-crash script
-    local script_src="$(dirname "${BASH_SOURCE[0]}")/scripts/collect-crash.sh"
+    local script_src="$SCRIPT_DIR/scripts/collect-crash.sh"
     local script_dst="/usr/local/bin/mycowave-collect-crash"
 
     if [[ -f "$script_src" ]]; then
@@ -1044,8 +1097,8 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/var/log/mycowave-crashes /sys/class/net /sys/kernel/debug
-CapabilityBoundingSet=CAP_DAC_READ_SEARCH
+ReadWritePaths=-/var/log/mycowave-crashes -/sys/kernel/debug /sys/class/net
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH CAP_SYSLOG CAP_SYS_RAWIO
 EOF
 
     run "systemctl daemon-reload"
@@ -1067,38 +1120,84 @@ EOF
 setup_monitor_mode() {
     [[ "$SKIP_MONITOR_SETUP" == true ]] && { info "Skipping monitor mode setup"; return; }
 
-    log "Configuring automatic monitor mode..."
-    warn "Monitor setup renames 88XXau/rtw88_8812au interfaces to wlan0 and the boot-time"
-    warn "service runs 'airmon-ng check kill' (kills NetworkManager). On multi-NIC systems"
-    warn "this can disrupt other interfaces — re-run with --skip-monitor to opt out."
+    log "Configuring monitor mode support (non-destructive by default)..."
 
-    # 1. Create udev rule for consistent interface naming
+    # 1. Safe udev rule: expose a stable symlink, never rename the interface.
     dry_write /etc/udev/rules.d/90-awus036ach.rules <<'EOF'
-# Alpha AWUS036ACH - consistent naming
-SUBSYSTEM=="net", ACTION=="add", DRIVERS=="88XXau", NAME="wlan0"
-SUBSYSTEM=="net", ACTION=="add", DRIVERS=="rtw88_8812au", NAME="wlan0"
+# Alpha AWUS036ACH - stable symlink (does NOT rename the interface)
+SUBSYSTEM=="net", ACTION=="add", DRIVERS=="rtw88_8812au", SYMLINK+="awus036ach"
+SUBSYSTEM=="net", ACTION=="add", DRIVERS=="88XXau", SYMLINK+="awus036ach"
 EOF
 
-    # 2. Create NetworkManager dispatcher to auto-enable monitor mode on plug
-    dry_write /etc/NetworkManager/dispatcher.d/99-awus036ach-monitor <<'EOF'
+    # 2. Manual helper (default). Monitor mode is opt-in at run time so the
+    # installer never kills NetworkManager behind the user's back.
+    dry_write /usr/local/bin/mycowave-monitor-mode <<'EOF'
 #!/bin/bash
-# Auto-enable monitor mode for AWUS036ACH on interface up
+# MycoWave manual monitor-mode helper.
+# Resolves the adapter, disables interfering processes, enables monitor mode,
+# and prints the resolved monitor interface. airmon-ng may enable monitor mode
+# IN PLACE (same interface name) instead of creating <iface>mon.
+set -euo pipefail
 
+# 1. Prefer the stable udev symlink, else the first netdev bound to our driver.
+iface=""
+for cand in /sys/class/net/awus036ach /dev/awus036ach; do
+    [[ -e "$cand" ]] || continue
+    resolved=$(basename "$(readlink -f "$cand" 2>/dev/null)" 2>/dev/null || true)
+    if [[ -n "$resolved" && -e "/sys/class/net/$resolved" ]]; then
+        iface="$resolved"; break
+    fi
+    name=$(basename "$cand")
+    if [[ -e "/sys/class/net/$name" ]]; then
+        iface="$name"; break
+    fi
+done
+if [[ -z "$iface" ]]; then
+    for d in /sys/class/net/*; do
+        name=$(basename "$d")
+        drv=$(basename "$(readlink -f "$d/device/driver/module" 2>/dev/null)" 2>/dev/null || true)
+        if [[ "$drv" == "rtw88_8812au" || "$drv" == "88XXau" ]]; then
+            iface="$name"; break
+        fi
+    done
+fi
+[[ -n "$iface" ]] || iface="wlan0"
+
+echo "Using interface: $iface"
+airmon-ng check kill >/dev/null 2>&1 || true
+airmon-ng start "$iface" >/dev/null 2>&1 || true
+
+# airmon-ng may keep the same name (in-place) or create a new interface.
+mon=$(iw dev 2>/dev/null | awk '/Interface/{i=$2} /type monitor/{print i; exit}' || true)
+[[ -n "$mon" ]] || mon="$iface"
+echo "monitor interface: $mon"
+echo "run: sudo airodump-ng $mon"
+EOF
+    run "chmod 755 /usr/local/bin/mycowave-monitor-mode"
+
+    # 3. Opt-in boot-time automation (--monitor-service); disabled by default.
+    if [[ "$ENABLE_MONITOR_SERVICE" == true ]]; then
+        warn "Monitor service enabled: the boot-time unit runs 'airmon-ng check kill'"
+        warn "which kills NetworkManager. On multi-NIC systems this can disrupt"
+        warn "other interfaces."
+        dry_write /etc/NetworkManager/dispatcher.d/99-awus036ach-monitor <<'EOF'
+#!/bin/bash
+# Auto-enable monitor mode for the AWUS036ACH on interface up (opt-in)
 IFACE="$1"
 STATUS="$2"
 
-if [[ "$IFACE" == "wlan0" && "$STATUS" == "up" ]]; then
-    # Kill interfering processes
-    airmon-ng check kill >/dev/null 2>&1
-    # Enable monitor mode
-    airmon-ng start "$IFACE" >/dev/null 2>&1
-    logger -t awus036ach "Monitor mode enabled on $IFACE"
+if [[ "$STATUS" == "up" ]]; then
+    drv=$(basename "$(readlink -f "/sys/class/net/$IFACE/device/driver/module" 2>/dev/null)" 2>/dev/null || true)
+    if [[ "$IFACE" == "awus036ach" || "$drv" == "rtw88_8812au" || "$drv" == "88XXau" ]]; then
+        airmon-ng check kill >/dev/null 2>&1
+        airmon-ng start "$IFACE" >/dev/null 2>&1
+        logger -t awus036ach "Monitor mode enabled on $IFACE"
+    fi
 fi
 EOF
-    run "chmod +x /etc/NetworkManager/dispatcher.d/99-awus036ach-monitor"
+        run "chmod +x /etc/NetworkManager/dispatcher.d/99-awus036ach-monitor"
 
-    # 3. systemd service for boot-time monitor mode (optional, enabled by default)
-    dry_write /etc/systemd/system/awus036ach-monitor.service <<'EOF'
+        dry_write /etc/systemd/system/awus036ach-monitor.service <<'EOF'
 [Unit]
 Description=Enable monitor mode for Alpha AWUS036ACH
 After=network.target
@@ -1106,28 +1205,34 @@ Wants=network.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/sbin/airmon-ng check kill
-ExecStart=/usr/sbin/airmon-ng start wlan0
+ExecStart=/usr/local/bin/mycowave-monitor-mode
 RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-    run "systemctl daemon-reload"
-    if systemctl is-enabled awus036ach-monitor.service >/dev/null 2>&1; then
-        verbose "awus036ach-monitor.service already enabled"
+        run "systemctl daemon-reload"
+        if systemctl is-enabled awus036ach-monitor.service >/dev/null 2>&1; then
+            verbose "awus036ach-monitor.service already enabled"
+        else
+            run "systemctl enable awus036ach-monitor.service"
+        fi
     else
-        run "systemctl enable awus036ach-monitor.service"
+        info "Boot-time monitor service not enabled (opt in with --monitor-service)"
     fi
 
     # 4. Regulatory domain for 5GHz channels
-    run "iw reg set $REG_DOMAIN"
-    dry_write /etc/default/crda <<EOF
+    run "iw reg set '$REG_DOMAIN'" || warn "Could not set regulatory domain '$REG_DOMAIN' — continuing."
+    if [[ ! -e /etc/default/crda ]]; then
+        dry_write /etc/default/crda <<EOF
 REGDOMAIN=$REG_DOMAIN
 EOF
+    else
+        info "Keeping existing /etc/default/crda (not clobbering a package-owned file)"
+    fi
 
-    success "Monitor mode automation configured"
+    success "Monitor mode support configured (manual helper: mycowave-monitor-mode)"
 }
 
 setup_dkms_autorebuild() {
@@ -1153,7 +1258,7 @@ setup_dkms_autorebuild() {
 modprobe 88XXau 2>/dev/null || modprobe rtw88_8812au 2>/dev/null || true
 EOF
     run "chmod +x /etc/initramfs-tools/scripts/init-top/awus036ach"
-    run "update-initramfs -u"
+    run "update-initramfs -u" || warn "update-initramfs failed - continuing."
 
     success "DKMS auto-rebuild configured"
 }
@@ -1165,7 +1270,7 @@ EOF
 detect_monitor_iface() {
     local managed_iface="${1:-}"
     local detected=""
-    detected=$(iw dev 2>/dev/null | awk '/Interface/{i=$2} /type monitor/{print i; exit}')
+    detected=$(iw dev 2>/dev/null | awk '/Interface/{i=$2} /type monitor/{print i; exit}' || true)
     if [[ -n "$detected" ]]; then
         printf '%s\n' "$detected"
     else
@@ -1220,6 +1325,11 @@ verify_install() {
 
 # ─── Comprehensive Test Suite ─────────────────────────────────────────────────
 run_full_test_suite() {
+    if [[ "$DRY_RUN" == true ]]; then
+        info "[dry-run] skipping test suite"
+        return 0
+    fi
+
     log "Running comprehensive test suite..."
 
     local iface=""
@@ -1267,8 +1377,11 @@ run_full_test_suite() {
     # Test 4: TX power setting (real check — no || true inside the probe)
     run_test "TX power configurable" "iw dev $iface set txpower fixed 2000" || true
 
-    # Test 5: Regulatory domain
-    local reg=$(iw reg get 2>/dev/null | grep -i country | head -1 | awk '{print $2}' || echo "00")
+    # Test 5: Regulatory domain (awk first; default to 00 if empty so a
+    # pipefail early-close can never yield a multi-line value)
+    local reg=""
+    reg=$(iw reg get 2>/dev/null | awk '/country/{print $2; exit}' || true)
+    [[ -n "$reg" ]] || reg="00"
     run_test "Regulatory domain set ($reg)" "[[ '$reg' != '00' ]]" || true
 
     # Test 6: Channel list populated
@@ -1294,7 +1407,7 @@ run_full_test_suite() {
     # Test 11: Monitor interface present — accepts a renamed OR in-place monitor interface.
     local mon_iface=""
     local mon_is_monitor=false
-    mon_iface=$(iw dev 2>/dev/null | awk '/Interface/{i=$2} /type monitor/{print i; exit}')
+    mon_iface=$(iw dev 2>/dev/null | awk '/Interface/{i=$2} /type monitor/{print i; exit}' || true)
     if [[ -n "$mon_iface" && -e "/sys/class/net/$mon_iface" ]]; then
         mon_is_monitor=true
     else
@@ -1330,8 +1443,8 @@ run_full_test_suite() {
         run_test "Module parameters directory accessible ($expected_module)" "[[ -d /sys/module/$expected_module/parameters ]]" || true
     fi
 
-    # Test 16: Firmware loaded
-    run_test "Firmware files present" "ls /lib/firmware/rtlwifi/rtw8812a_fw.bin 2>/dev/null || ls /lib/firmware/rtw8812a_fw.bin 2>/dev/null" || true
+    # Test 16: Firmware loaded (rtw88 blobs live under /lib/firmware/rtw88/)
+    run_test "Firmware files present" "ls /lib/firmware/rtw88/rtw8812a_fw.bin 2>/dev/null || ls /lib/firmware/rtw8812a_fw.bin 2>/dev/null" || true
 
     # Test 17: Thermal zone accessible (if thermal enabled)
     if [[ "$ENABLE_THERMAL" == true ]]; then
@@ -1416,6 +1529,10 @@ uninstall_driver() {
         local recorded=""
         while IFS= read -r recorded; do
             [[ -n "$recorded" ]] || continue
+            # /etc/default/crda is handled below with a dpkg-ownership check.
+            if [[ "$recorded" == "/etc/default/crda" ]]; then
+                continue
+            fi
             run "rm -f '$recorded'"
         done < "$MANIFEST_FILE"
     fi
@@ -1430,7 +1547,7 @@ uninstall_driver() {
 
     # Remove initramfs hook
     run "rm -f /etc/initramfs-tools/scripts/init-top/awus036ach"
-    run "update-initramfs -u"
+    run "update-initramfs -u" || warn "update-initramfs failed - continuing."
 
     # Remove modprobe configs
     run "rm -f /etc/modprobe.d/blacklist-rtl88xxau.conf"
@@ -1451,6 +1568,7 @@ uninstall_driver() {
     run "rm -f /usr/local/bin/wifi-watchdog"
     run "rm -f /usr/local/bin/thermal-monitor"
     run "rm -f /usr/local/bin/mycowave-collect-crash"
+    run "rm -f /usr/local/bin/mycowave-monitor-mode"
 
     # Remove multi-user.target.wants symlinks left by service enables
     run "rm -f /etc/systemd/system/multi-user.target.wants/awus036ach-monitor.service"
@@ -1478,22 +1596,53 @@ uninstall_driver() {
     run "modprobe -r rtw88_8821au 2>/dev/null || true"
     run "modprobe -r rtw88_8814au 2>/dev/null || true"
 
-    # Remove DKMS modules (correct names: rtl88xxau/88XXau, rtl8814au)
+    # Remove DKMS modules (correct names: rtl88xxau/88XXau, rtl8812au, rtw88)
     run "dkms remove -m rtl88xxau -v all --all 2>/dev/null || true"
     run "dkms remove -m 88XXau -v all --all 2>/dev/null || true"
     run "dkms remove -m rtl8814au -v all --all 2>/dev/null || true"
     run "dkms remove -m rtl8812au -v all --all 2>/dev/null || true"
-    run "apt-get purge -y realtek-rtl88xxau-dkms realtek-rtl8814au-dkms 2>/dev/null || true"
+    run "dkms remove -m rtw88 -v all --all 2>/dev/null || true"
+    # Tolerate DKMS builds registered without an explicit version form.
+    run "dkms remove -m rtw88 --all 2>/dev/null || true"
+
+    # Purge only the DKMS packages MycoWave itself recorded as installed.
+    local pkg_list=()
+    if [[ -f "$PKG_MANIFEST_FILE" ]]; then
+        local pkg_line=""
+        while IFS= read -r pkg_line; do
+            if [[ -n "$pkg_line" ]]; then
+                pkg_list+=("$pkg_line")
+            fi
+        done < "$PKG_MANIFEST_FILE"
+    fi
+    if [[ ${#pkg_list[@]} -gt 0 ]]; then
+        local p=""
+        for p in "${pkg_list[@]}"; do
+            run "apt-get purge -y '$p' 2>/dev/null || true"
+        done
+    else
+        warn "No MycoWave-installed DKMS packages recorded — leaving realtek-rtl88xxau-dkms/realtek-rtl8814au-dkms untouched."
+        if dpkg-query -W -f='${Status}' realtek-rtl88xxau-dkms 2>/dev/null | grep -q "ok installed"; then
+            warn "realtek-rtl88xxau-dkms is installed but not owned by MycoWave; remove it manually if desired."
+        fi
+    fi
 
     # Remove leftover DKMS sources, installer clones, regdomain, firmware copies
     run "rm -rf /usr/src/rtl88xxau-* /usr/src/rtl8812au-* /usr/src/rtl8814au-*"
+    run "rm -rf /usr/src/rtw88-*"
     run "rm -rf /tmp/realtek-rtl88xxau-auto-installer /tmp/rtl8812au /tmp/rtw88"
 
-    # /etc/default/crda is package-owned (crda): only remove if MycoWave created it.
-    if manifest_has /etc/default/crda; then
+    # Remove Pi config backups created by the Pi optimizations script.
+    run "rm -f /boot/config.txt.mycowave.bak /boot/cmdline.txt.mycowave.bak"
+    run "rm -f /boot/firmware/config.txt.mycowave.bak /boot/firmware/cmdline.txt.mycowave.bak"
+
+    # /etc/default/crda: never delete when dpkg owns it; else only if MycoWave created it.
+    if dpkg -S /etc/default/crda >/dev/null 2>&1; then
+        warn "Keeping /etc/default/crda (package-owned by $(dpkg -S /etc/default/crda 2>/dev/null | cut -d: -f1)); remove manually if desired."
+    elif manifest_has /etc/default/crda; then
         run "rm -f /etc/default/crda"
     elif [[ -e /etc/default/crda ]]; then
-        warn "Keeping /etc/default/crda (not created by MycoWave; package-owned by crda). Remove manually if desired."
+        warn "Keeping /etc/default/crda (not created by MycoWave). Remove manually if desired."
     fi
 
     # Firmware blobs under /lib/firmware/rtlwifi are package-owned (linux-firmware):
@@ -1507,6 +1656,15 @@ uninstall_driver() {
             run "rm -f '$fw_candidate'"
         elif [[ -e "$fw_candidate" ]]; then
             warn "Keeping $fw_candidate (not created by MycoWave; package-owned by linux-firmware)."
+        fi
+    done
+
+    # rtw88 firmware installed by the lwfinger strategy (manifest-guarded).
+    local rtw88_fw=""
+    for rtw88_fw in /lib/firmware/rtw88/*.bin; do
+        [[ -e "$rtw88_fw" ]] || continue
+        if manifest_has "$rtw88_fw"; then
+            run "rm -f '$rtw88_fw'"
         fi
     done
 
@@ -1528,6 +1686,7 @@ print_banner() {
 ║  • Strategies: lwfinger rtw88, ac3rn, kali-dkms, aircrack-ng       ║
 ║  • x86_64, ARM64 (Raspberry Pi)                                    ║
 ║  • Secure Boot (MOK enrollment)                                     ║
+║  • Monitor: manual helper (default) | --monitor-service (opt-in)    ║
 ║  • Auto monitor mode, injection test, 5GHz channels                ║
 ║  • Performance optimizations (--performance)                       ║
 ╚═══════════════════════════════════════════════════════════════════════╝
@@ -1546,6 +1705,7 @@ Options:
                          (kali-dkms is refused on kernels > 6.13)
   --skip-verify          Skip post-install verification
   --skip-monitor         Skip automatic monitor mode setup
+  --monitor-service      Opt-in: install boot-time monitor service (kills NetworkManager)
   --reg-domain CODE      Regulatory domain for 5GHz (default: BO)
   --performance          Enable performance optimizations (USB2, disable powersave, max TX power)
   --skip-firmware        Skip firmware update check
@@ -1584,6 +1744,7 @@ parse_args() {
             --force-method) [[ $# -lt 2 ]] && { error "--force-method requires an argument (inkernel|lwfinger|kali-dkms|ac3rn|aircrack-ng)"; usage; exit 1; }; FORCE_METHOD="$2"; shift ;;
             --skip-verify) SKIP_VERIFY=true ;;
             --skip-monitor) SKIP_MONITOR_SETUP=true ;;
+            --monitor-service) ENABLE_MONITOR_SERVICE=true ;;
             --reg-domain) [[ $# -lt 2 ]] && { error "--reg-domain requires an argument (e.g. BO, US)"; usage; exit 1; }; REG_DOMAIN="$2"; shift ;;
             --performance) ENABLE_PERFORMANCE=true ;;
             --skip-firmware) SKIP_FIRMWARE_UPDATE=true ;;
@@ -1700,7 +1861,7 @@ main() {
     else
         info "Interface: no wlan* interface detected — check the adapter is plugged in"
     fi
-    info "Monitor mode: Auto-enabled on plug/boot (airmon-ng may keep the same name)"
+    info "Monitor mode: manual helper 'mycowave-monitor-mode' (boot-time service via --monitor-service)"
     info "5GHz channels: Enabled via regulatory domain $REG_DOMAIN"
     info "Log: $LOG_FILE"
     info ""

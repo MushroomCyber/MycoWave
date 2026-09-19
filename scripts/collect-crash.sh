@@ -184,7 +184,7 @@ collect_usb_info() {
     for dev in /sys/bus/usb/devices/*/idVendor; do
         if [[ -f "$dev" ]] && [[ "$(cat "$dev" 2>/dev/null)" == "0bda" ]]; then
             local pid_file="${dev%idVendor}idProduct"
-            if [[ -f "$pid_file" ]] && [[ "$(cat "$pid_file" 2>/dev/null)" == "a811" ]]; then
+            if [[ -f "$pid_file" ]] && [[ "$(cat "$pid_file" 2>/dev/null)" =~ ^(8812|881a|a811)$ ]]; then
                 local dev_path="${dev%idVendor}"
                 local dev_num=$(basename "$dev_path")
                 mkdir -p "$OUT_DIR/usb-device-$dev_num"
@@ -272,8 +272,11 @@ compress_output() {
     find "$OUT_DIR" -type f -exec chmod 600 {} + 2>/dev/null || true
 
     local archive="${OUT_DIR}.tar.gz"
-    tar -czf "$archive" -C "$OUT_BASE_DIR" "$(basename "$OUT_DIR")" 2>/dev/null
-    success "Compressed archive: $archive"
+    if tar -czf "$archive" -C "$OUT_BASE_DIR" "$(basename "$OUT_DIR")" 2>/dev/null; then
+        success "Compressed archive: $archive"
+    else
+        warn "Failed to create archive: $archive"
+    fi
     echo "$archive"
 }
 
@@ -323,6 +326,7 @@ list_dumps() {
 clean_dumps() {
     log "Cleaning crash dumps older than 30 days..."
     find "$OUT_BASE_DIR" -type d -mtime +30 -exec rm -rf {} + 2>/dev/null || true
+    find "$OUT_BASE_DIR" -maxdepth 1 -type f -name '*.tar.gz' -mtime +30 -delete 2>/dev/null || true
     success "Cleanup complete"
 }
 

@@ -74,20 +74,24 @@ sudo apt install linux-headers-$(uname -r)
 
 ### 3. "Monitor mode fails / interface not created"
 
-**Cause**: NetworkManager/wpa_supplicant holding interface.
+**Cause**: NetworkManager/wpa_supplicant holding interface, or no monitor interface was started.
 
 **Solution**:
 ```bash
-# Kill interfering processes
+# Easiest: the installed helper resolves the adapter, enables monitor mode,
+# and prints the real monitor interface (setup is non-destructive).
+sudo mycowave-monitor-mode
+
+# Manual equivalent
 sudo airmon-ng check kill
-
-# Then start monitor mode
-sudo airmon-ng start wlan0
-
-# Verify — modern airmon-ng may enable monitor mode in place, so confirm the name first
-iw dev
+sudo airmon-ng start wlan0   # or the stable "awus036ach" symlink
+iw dev   # confirm the monitor interface — airmon-ng may keep the same name
 iw dev <mon_iface> info | grep monitor
 ```
+
+Boot-time monitor automation is **opt-in** via `--monitor-service` (it runs
+`airmon-ng check kill`, which kills NetworkManager); `--skip-monitor` skips all
+monitor automation (symlink rule, helper, dispatcher and service).
 
 ### 4. "No 5GHz channels showing"
 
@@ -329,7 +333,7 @@ sudo ./mycowave-install.sh --force-method inkernel
 # Re-sign modules after kernel update
 sudo /usr/local/bin/mycowave-enroll-mok sign
 
-# Manual monitor mode
+# Manual monitor mode (or just run: sudo mycowave-monitor-mode)
 sudo airmon-ng check kill
 sudo airmon-ng start wlan0
 iw dev   # note the interface in monitor mode (airmon-ng may keep wlan0)

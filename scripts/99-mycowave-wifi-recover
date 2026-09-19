@@ -50,11 +50,16 @@ if [[ "$ACTION" == "down" ]]; then
     done
 
     if [[ "$crash_detected" == true ]]; then
-        log "Triggering immediate watchdog recovery..."
-        # Prefer a one-shot recovery over merely restarting the polling
-        # daemon, which sleeps before its first health check.
-        if /usr/local/bin/wifi-watchdog recover 2>/dev/null; then
-            log "Immediate recovery completed via wifi-watchdog recover"
+        log "Triggering out-of-band watchdog recovery..."
+        # Run recovery detached: a synchronous USB reset + driver reload +
+        # NetworkManager restart (~24s of sleeps) inside a dispatcher callback
+        # risks re-entrancy and NM timeouts.
+        if command -v systemd-run >/dev/null 2>&1 \
+            && systemd-run --quiet --collect /usr/local/bin/wifi-watchdog recover >/dev/null 2>&1; then
+            log "Started one-shot recovery via systemd-run"
+        elif [[ -x /usr/local/bin/wifi-watchdog ]]; then
+            nohup /usr/local/bin/wifi-watchdog recover >/dev/null 2>&1 &
+            log "Started background recovery via wifi-watchdog recover"
         else
             systemctl restart mycowave-watchdog.service 2>/dev/null || true
             log "Fell back to restarting mycowave-watchdog.service"

@@ -40,6 +40,19 @@ is_arm() {
     [[ -f /proc/device-tree/model ]]
 }
 
+# Modern airmon-ng may enable monitor mode in place instead of creating
+# <iface>mon. Resolve the real monitor interface and fall back to the
+# managed interface when none is in monitor mode.
+detect_monitor_iface() {
+    local mon
+    mon=$(iw dev 2>/dev/null | awk '/Interface/{i=$2} /type monitor/{print i; exit}' || true)
+    if [[ -n "$mon" ]]; then
+        printf '%s\n' "$mon"
+        return 0
+    fi
+    printf '%s\n' "$INTERFACE"
+}
+
 # ─── Thermal Reading ────────────────────────────────────────────────────────
 read_rtw88_thermal() {
     # rtw88 debugfs thermal readings (per PHY/path)
@@ -151,35 +164,30 @@ set_tx_power() {
     return 1
 }
 
-get_current_tx_power() {
-    if command -v iw >/dev/null 2>&1; then
-        iw dev "$INTERFACE" get txpower 2>/dev/null | grep -oE '[0-9]+' | head -1
-    fi
-}
-
 # ─── Thermal Actions ────────────────────────────────────────────────────────
 apply_throttle() {
     log "THROTTLE: Reducing TX power to 10 dBm (1000 mBm)"
-    set_tx_power 1000
+    set_tx_power 1000 || warn "TX power set failed"
     THROTTLED=true
 }
 
 apply_critical() {
     log "CRITICAL: Setting TX power to minimum (0 dBm)"
-    set_tx_power 0
+    set_tx_power 0 || warn "TX power set failed"
     CRITICAL_ACTION=true
 
     # Also try to disable monitor mode to reduce heat
-    local mon_iface="${INTERFACE}mon"
-    if [[ -e "/sys/class/net/$mon_iface" ]]; then
-        log "Disabling monitor mode to reduce thermal load"
+    local mon_iface
+    mon_iface=$(detect_monitor_iface)
+    if [[ "$mon_iface" != "$INTERFACE" ]]; then
+        log "Disabling monitor mode on $mon_iface to reduce thermal load"
         airmon-ng stop "$mon_iface" >/dev/null 2>&1 || true
     fi
 }
 
 restore_full_power() {
     log "RECOVER: Restoring full TX power (30 dBm / 3000 mBm)"
-    set_tx_power 3000
+    set_tx_power 3000 || warn "TX power set failed"
     THROTTLED=false
     CRITICAL_ACTION=false
 }
@@ -285,7 +293,7 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/sys/class/net /sys/kernel/debug
+ReadWritePaths=/sys/class/net -/sys/kernel/debug
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
 
 [Install]

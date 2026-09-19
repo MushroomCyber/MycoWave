@@ -266,12 +266,17 @@ Use `--pi-optimizations` flag for USB power, CPU governor, and memory split twea
 After installation, MycoWave verifies:
 
 1. **Module loaded**: `lsmod | grep -E '88XXau|rtw88_8812au'`
-2. **Interface exists**: `wlan0` in `/sys/class/net/`
-3. **Monitor mode works**: `airmon-ng start wlan0`, then read the monitor interface from `iw dev`
+2. **Interface exists**: `wlan0` in `/sys/class/net/` (the udev rule also exposes a stable `awus036ach` symlink)
+3. **Monitor mode works**: run `sudo mycowave-monitor-mode` (the installed helper resolves the adapter and prints the
+   real interface), or `airmon-ng start wlan0` and read the monitor interface from `iw dev`
    (modern `airmon-ng` enables monitor mode **in place** and may keep `wlan0` instead of creating `wlan0mon`)
 4. **Injection capable**: `aireplay-ng -9 <mon_iface>` (real injection test; reported as
    `managed: OK|FAILED | injection: OK|FAILED|SKIPPED` in the `--test` summary)
 5. **5GHz channels**: `iw phy phy0 channels | grep 5xxx`
+
+> Monitor setup is **non-destructive** by default: the udev rule only adds the `awus036ach` symlink, and the
+> boot-time service/NetworkManager dispatcher are opt-in via `--monitor-service` (they kill NetworkManager).
+> `--skip-monitor` skips all monitor automation; `--test` is a no-op under `--dry-run`.
 
 ---
 

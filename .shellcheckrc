@@ -1,0 +1,10 @@
+# MycoWave ShellCheck configuration - conservative by design.
+#
+# Keep this file minimal: only single, justified checks are disabled below.
+# Do not disable whole categories here; prefer inline `# shellcheck disable=`
+# with a reason at the specific call site.
+
+# SC1091: ShellCheck cannot follow sourced files, which are resolved at runtime
+# from distro-provided paths. ShellCheck cannot statically verify them, so this
+# check produces false positives. All other checks stay enabled.
+disable=SC1091

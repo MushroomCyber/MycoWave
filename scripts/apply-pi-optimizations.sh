@@ -50,8 +50,12 @@ apply_config_txt() {
     local backup="${config}.mycowave.bak"
 
     [[ -f "$config" ]] || { warn "No $config found"; return 1; }
-    cp "$config" "$backup"
-    info "Backed up to $backup"
+    if [[ ! -f "$backup" ]]; then
+        cp "$config" "$backup"
+        info "Backed up to $backup"
+    else
+        info "Backup already exists: $backup"
+    fi
 
     # USB Power - Critical for AWUS036ACH (needs ~800mA)
     if ! grep -q "^max_usb_current=1" "$config"; then
@@ -93,8 +97,12 @@ apply_cmdline_txt() {
     local backup="${cmdline}.mycowave.bak"
 
     [[ -f "$cmdline" ]] || { warn "No $cmdline found"; return 1; }
-    cp "$cmdline" "$backup"
-    info "Backed up to $backup"
+    if [[ ! -f "$backup" ]]; then
+        cp "$cmdline" "$backup"
+        info "Backed up to $backup"
+    else
+        info "Backup already exists: $backup"
+    fi
 
     # Read current cmdline
     local current=$(cat "$cmdline")
@@ -133,7 +141,7 @@ After=multi-user.target
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash -c 'for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo performance > $cpu; done'
+ExecStart=/bin/bash -c 'for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do [ -f "$cpu" ] && echo performance > "$cpu" 2>/dev/null || true; done'
 RemainAfterExit=yes
 
 [Install]
@@ -155,8 +163,8 @@ install_kalipi_headers() {
         return 0
     fi
 
-    apt-get update -qq
-    apt-get install -y kalipi-kernel-headers
+    apt-get update -qq || { warn "apt-get update failed; skipping kalipi-kernel-headers"; return 0; }
+    apt-get install -y kalipi-kernel-headers || { warn "Failed to install kalipi-kernel-headers"; return 0; }
 
     success "kalipi-kernel-headers installed"
 }
@@ -188,19 +196,21 @@ create_udev_rules() {
 
     cat > /etc/udev/rules.d/99-mycowave-usb-pm.rules <<'EOF'
 # MycoWave - Disable USB autosuspend for AWUS036ACH (RTL8812AU)
-# Vendor: 0bda (Realtek), Product: a811 (RTL8812AU)
+# Vendor: 0bda (Realtek), Product: a811/8812/881a (RTL8812AU)
 
-ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="0bda", ATTR{idProduct}=="a811", \
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="0bda", ATTR{idProduct}=="a811|8812|881a", \
     RUN+="/bin/sh -c 'echo -1 > /sys$DEVPATH/power/autosuspend_delay_ms; echo on > /sys$DEVPATH/power/control'"
 
 # Also match by interface class (wireless)
-ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="0bda", ATTR{idProduct}=="a811", \
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="0bda", ATTR{idProduct}=="a811|8812|881a", \
     ATTR{bInterfaceClass}=="ff", \
     RUN+="/bin/sh -c 'echo -1 > /sys$DEVPATH/power/autosuspend_delay_ms; echo on > /sys$DEVPATH/power/control'"
 EOF
 
     udevadm control --reload-rules
-    udevadm trigger --subsystem-match=usb --attr-match=idVendor=0bda --attr-match=idProduct=a811 2>/dev/null || true
+    for pid in a811 8812 881a; do
+        udevadm trigger --subsystem-match=usb --attr-match=idVendor=0bda --attr-match=idProduct="$pid" 2>/dev/null || true
+    done
 
     success "Created /etc/udev/rules.d/99-mycowave-usb-pm.rules"
 }

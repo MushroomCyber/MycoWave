@@ -29,6 +29,7 @@ info()   { logger -t "$LOG_TAG" "$*"; echo -e "${GREEN}[INFO]${NC} $*"; }
 warn()   { logger -t "$LOG_TAG" "$*"; echo -e "${YELLOW}[WARN]${NC} $*"; }
 error()  { logger -t "$LOG_TAG" "$*"; echo -e "${RED}[ERROR]${NC} $*"; }
 success() { logger -t "$LOG_TAG" "$*"; echo -e "${GREEN}[OK]${NC} $*"; }
+verbose() { [[ "${MYCOWAVE_VERBOSE:-false}" == true ]] && log "$*" || true; }
 
 # ─── Health Checks ───────────────────────────────────────────────────────────
 check_interface_exists() {
@@ -88,11 +89,24 @@ check_firmware_crash() {
     return 0
 }
 
+# Modern airmon-ng may enable monitor mode in place instead of creating
+# <iface>mon. Resolve the real monitor interface and fall back to the
+# managed interface when none is in monitor mode.
+detect_monitor_iface() {
+    local mon
+    mon=$(iw dev 2>/dev/null | awk '/Interface/{i=$2} /type monitor/{print i; exit}' || true)
+    if [[ -n "$mon" ]]; then
+        printf '%s\n' "$mon"
+        return 0
+    fi
+    printf '%s\n' "$INTERFACE"
+}
+
 check_monitor_mode() {
-    # If in monitor mode, verify mon interface exists
-    local mon_iface="${INTERFACE}mon"
-    if [[ -e "/sys/class/net/$mon_iface" ]]; then
-        # Monitor interface exists - check it's up
+    # If a dedicated monitor interface is in use, it must be up
+    local mon_iface
+    mon_iface=$(detect_monitor_iface)
+    if [[ "$mon_iface" != "$INTERFACE" ]]; then
         ip link show "$mon_iface" | grep -q "UP" || return 1
     fi
     return 0
@@ -126,7 +140,7 @@ reset_usb_device() {
     for dev in /sys/bus/usb/devices/*/idVendor; do
         if [[ -f "$dev" ]] && [[ "$(cat "$dev" 2>/dev/null)" == "0bda" ]]; then
             local pid_file="${dev%idVendor}idProduct"
-            if [[ -f "$pid_file" ]] && [[ "$(cat "$pid_file" 2>/dev/null)" == "a811" ]]; then
+            if [[ -f "$pid_file" ]] && [[ "$(cat "$pid_file" 2>/dev/null)" =~ ^(8812|881a|a811)$ ]]; then
                 local auth_file="${dev%idVendor}authorized"
                 if [[ -f "$auth_file" ]]; then
                     log "Resetting USB device via vendor/product match"
@@ -182,7 +196,7 @@ reload_driver() {
 
     sleep 3
 
-    if lsmod | grep -q "^$loaded_mod"; then
+    if [[ -n "$loaded_mod" ]] && lsmod | grep -q "^$loaded_mod"; then
         success "Driver $loaded_mod reloaded"
         return 0
     else
@@ -206,9 +220,15 @@ restore_monitor_mode() {
 
     # Start monitor mode
     if airmon-ng start "$INTERFACE" >/dev/null 2>&1; then
-        local mon_iface="${INTERFACE}mon"
-        if [[ -e "/sys/class/net/$mon_iface" ]]; then
+        local mon_iface
+        mon_iface=$(detect_monitor_iface)
+        if [[ "$mon_iface" != "$INTERFACE" && -e "/sys/class/net/$mon_iface" ]]; then
             success "Monitor mode restored on $mon_iface"
+            return 0
+        fi
+        # Modern airmon-ng may enable monitor mode in place on $INTERFACE
+        if iw dev "$INTERFACE" info 2>/dev/null | grep -q "type monitor"; then
+            success "Monitor mode restored in place on $INTERFACE"
             return 0
         fi
     fi
@@ -227,17 +247,25 @@ full_recovery() {
         "restore_monitor_mode"
     )
 
+    local step_failed=0
     for step in "${steps[@]}"; do
         log "Recovery step: $step"
         if $step; then
             success "$step completed"
         else
             error "$step failed"
+            step_failed=1
         fi
         sleep 2
     done
 
+    if [[ "$step_failed" -ne 0 ]]; then
+        log "=== RECOVERY INCOMPLETE ==="
+        return 1
+    fi
+
     log "=== RECOVERY COMPLETE ==="
+    return 0
 }
 
 # ─── Main Watchdog Loop ──────────────────────────────────────────────────────
@@ -298,7 +326,7 @@ run_watchdog() {
             local now=$(date +%s)
             if (( failure_count >= MAX_FAILURES )) && (( now - last_recovery > recovery_cooldown )); then
                 last_recovery=$now
-                full_recovery
+                full_recovery || warn "Full recovery reported one or more failed steps"
                 failure_count=0
             fi
         fi

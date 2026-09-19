@@ -1,0 +1,54 @@
+name: Lint
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint:
+    name: bash -n + shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y shellcheck
+          shellcheck --version
+
+      - name: Syntax check (bash -n)
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(
+            {
+              find . -path ./.git -prune -o -type f -name '*.sh' -print
+              if [[ -f scripts/99-mycowave-wifi-recover ]]; then
+                printf '%s\n' scripts/99-mycowave-wifi-recover
+              fi
+              grep -rIl -m1 -E '^#!.*\b(bash|sh)\b' --exclude-dir=.git . || true
+            } | sed 's|^\./||' | sort -u
+          )
+          echo "Checking ${#files[@]} shell file(s)"
+          for f in "${files[@]}"; do
+            echo "bash -n $f"
+            bash -n "$f"
+          done
+
+      - name: ShellCheck
+        # TODO: raise this to --severity=warning once the existing warnings have
+        # been cleaned up. Starting at "error" keeps the first CI run from going
+        # red on pre-existing style warnings.
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(
+            {
+              find . -path ./.git -prune -o -type f -name '*.sh' -print
+              if [[ -f scripts/99-mycowave-wifi-recover ]]; then
+                printf '%s\n' scripts/99-mycowave-wifi-recover
+              fi
+              grep -rIl -m1 -E '^#!.*\b(bash|sh)\b' --exclude-dir=.git . || true
+            } | sed 's|^\./||' | sort -u
+          )
+          shellcheck --severity=error "${files[@]}"
