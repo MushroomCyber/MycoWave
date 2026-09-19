@@ -1,0 +1,4 @@
+# Agent guidance file.
+# Kept locally so coding agents pick up repo-specific instructions, but
+# intentionally not published in the repository.
+/AGENTS.md
