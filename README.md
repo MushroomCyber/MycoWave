@@ -226,23 +226,39 @@ The full install log is at `/var/log/mycowave-install.log`.
 
 ```
 ├── /etc/modprobe.d/
-│   ├── blacklist-rtl88xxau.conf      # Or blacklist-rtw88.conf
-│   └── awus036ach-performance.conf   # (with --performance)
+│   ├── blacklist-rtl88xxau.conf      # Or blacklist-rtw88.conf (opposing family)
+│   ├── awus036ach-performance.conf   # (with --performance)
+│   ├── mycowave-coex.conf            # (with --coex)
+│   └── rtw88.conf                    # (lwfinger strategy only)
 ├── /usr/local/bin/
-│   └── mycowave-monitor-mode         # Manual monitor helper (resolves + prints iface)
-├── /etc/udev/rules.d/
-│   └── 90-awus036ach.rules           # Stable "awus036ach" symlink (no rename)
-├── /etc/NetworkManager/dispatcher.d/
-│   └── 99-awus036ach-monitor         # (only with --monitor-service)
+│   ├── mycowave-monitor-mode         # Monitor helper, resolves + prints iface
+│   ├── mycowave-collect-crash        # Crash collector (default ON)
+│   ├── wifi-watchdog                 # (with --watchdog)
+│   ├── thermal-monitor               # (with --thermal)
+│   ├── mycowave-enroll-mok           # (with --secure-boot)
+│   └── mycowave-pi-optimizations     # (with --pi-optimizations)
 ├── /etc/systemd/system/
-│   └── awus036ach-monitor.service    # (only with --monitor-service)
+│   ├── awus036ach-monitor.service    # (only with --monitor-service)
+│   ├── mycowave-watchdog.service     # (with --watchdog)
+│   ├── mycowave-thermal.service      # (with --thermal)
+│   ├── mycowave-cpu-governor.service # (with --pi-optimizations)
+│   ├── mycowave-crash-collector.service  # Crash collector (default ON)
+│   └── mycowave-crash-collector.timer    # Hourly (default ON)
+├── /etc/udev/rules.d/
+│   ├── 90-awus036ach.rules           # Stable "awus036ach" symlink (no rename)
+│   └── 99-mycowave-usb-pm.rules      # USB autosuspend override (with --pi-optimizations)
+├── /etc/NetworkManager/dispatcher.d/
+│   ├── 99-awus036ach-monitor         # (only with --monitor-service)
+│   └── 99-mycowave-wifi-recover      # Crash hook (with --watchdog)
 ├── /etc/initramfs-tools/scripts/init-top/
 │   └── awus036ach                    # Early driver load
 ├── /lib/firmware/rtw88/
 │   └── rtw8812a_fw.bin, rtw8821a_fw.bin  # Latest rtw88 firmware
 ├── /var/lib/mycowave/
 │   └── installed.files               # Uninstall manifest
-└── /var/log/mycowave-install.log     # Install log
+└── /var/log/
+    ├── mycowave-install.log          # Install log (kept on uninstall)
+    └── mycowave-crashes/             # Crash dumps, removed on uninstall (default ON)
 ```
 
 ---
@@ -298,8 +314,12 @@ MycoWave/
 ├── mycowave-install.sh      # Main installer script
 ├── README.md                # This file
 ├── LICENSE                  # MIT License
+├── media/
+│   └── mycowave-logo.png    # README logo
 ├── .github/workflows/
 │   └── lint.yml             # CI Lint: bash -n + shellcheck --severity=error
+├── .shellcheckrc            # ShellCheck config
+├── .gitattributes           # LF-only line endings for shell/config files
 ├── docs/
 │   ├── STRATEGIES.md        # Driver strategy details
 │   ├── PERFORMANCE.md       # Performance tuning guide
@@ -307,10 +327,15 @@ MycoWave/
 │   ├── TROUBLESHOOTING.md   # Common issues
 │   └── ARM64.md             # Raspberry Pi / ARM64 notes
 └── scripts/
-    ├── enroll-mok.sh        # MOK enrollment helper
-    ├── wifi-watchdog.sh     # Self-healing watchdog
-    ├── collect-crash.sh     # Debug crash dump collector
-    └── lint.sh              # Local lint runner (bash -n + shellcheck)
+    ├── enroll-mok.sh            # MOK enrollment helper
+    ├── apply-pi-optimizations.sh  # Raspberry Pi / ARM64 tuning
+    ├── wifi-watchdog.sh         # Self-healing watchdog daemon
+    ├── mycowave-watchdog.service  # Watchdog systemd unit
+    ├── thermal-monitor.sh       # Thermal monitoring daemon
+    ├── mycowave-coex.conf       # Bluetooth coexistence reference
+    ├── collect-crash.sh         # Debug crash dump collector
+    ├── 99-mycowave-wifi-recover  # NetworkManager crash hook
+    └── lint.sh                  # Local lint runner (bash -n + shellcheck)
 ```
 
 ---
