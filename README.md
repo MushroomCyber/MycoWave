@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="media/mycowave-logo.png" alt="MycoWave logo" width="240">
+</p>
+
 # MycoWave
 
 > **Smart installer for the Alpha AWUS036ACH Wi-Fi adapter on Kali Linux**
@@ -66,9 +70,12 @@ monitor automation, skip firmware, skip verification, the full test suite, dry-r
 on uninstall. It also lets you choose the regulatory domain (2-letter code, default `BO`) and the driver strategy
 (auto/`inkernel`/`lwfinger`/`kali-dkms`/`ac3rn`/`aircrack-ng`).
 
-Keys: number to toggle or choose, `p` performance preset, `d` defaults, `a` clear optional toggles, `y` or Enter to
-confirm, `q` to abort, `h` for help. Enabling the full test suite selects `--skip-verify` too, same as the `--test`
-flag.
+Keys: number to toggle or choose, `p` performance preset, `d` defaults, `a` clear optional toggles, `u` (or row `18`)
+to uninstall, `y` or Enter to confirm, `q` to abort, `h` for help. Enabling the full test suite selects
+`--skip-verify` too, same as the `--test` flag.
+
+The menu can also run the uninstaller: press `u` (or `18`) and type `yes` to confirm. It behaves exactly like
+`--uninstall`, and honours the row 15 "Remove MOK keys on uninstall" option (same as `--uninstall --remove-mok`).
 
 The menu only opens automatically for a bare run on a real terminal. `--menu` (`-m`) forces it, `--no-menu` skips
 it, and flagged runs, `--uninstall`, `--help`, piped/CI runs and non-TTY runs behave exactly as before.

@@ -1832,6 +1832,26 @@ menu_choose_strategy() {
     esac
 }
 
+menu_uninstall() {
+    menu_warn "Uninstall removes the MycoWave driver and configuration (same as --uninstall)."
+    menu_info "MOK keys are kept unless row 15 (Remove MOK keys on uninstall) is enabled."
+    printf 'Type yes to confirm uninstall: '
+    local __confirm=""
+    if ! menu_read __confirm; then
+        printf '\n'
+        menu_info "Input closed (EOF) - aborting; nothing was changed."
+        exit 0
+    fi
+    menu_trim __confirm
+    if [[ "$__confirm" == "yes" ]]; then
+        UNINSTALL=true
+        menu_info "Uninstall selected - proceeding."
+        return 0
+    fi
+    menu_warn "Uninstall cancelled."
+    return 0
+}
+
 menu_help() {
     printf '\n'
     printf '%b\n' "${CYAN}Menu help${NC}"
@@ -1842,6 +1862,7 @@ menu_help() {
     printf '  y  confirm and continue (Enter alone also confirms)\n'
     printf '  q  abort without changing anything\n'
     printf '  h  show this help\n'
+    printf '  u  uninstall MycoWave (row 18) - asks for confirmation\n'
     printf '\n'
     printf '  Enabling the full test suite forces skip-verify, matching --test.\n'
     printf '  Crash collector (row 7) is ON by default; toggling it sets --skip-crash-collector.\n'
@@ -1856,7 +1877,7 @@ menu_render() {
     printf '%b\n' "  ${CYAN}MycoWave installer - interactive options${NC} ${YELLOW}(v$SCRIPT_VERSION)${NC}"
     printf '%b\n' "${BLUE}════════════════════════════════════════════════════════════════════${NC}"
     printf '%b\n' "  ${YELLOW}Keys:${NC} [number]=toggle/choose   [p]=performance preset   [d]=defaults"
-    printf '%b\n' "        [a]=clear all   [y/Enter]=confirm   [q]=abort   [h]=help"
+    printf '%b\n' "        [a]=clear all   [u]=uninstall   [y/Enter]=confirm   [q]=abort   [h]=help"
     printf '\n'
     menu_row  1 "$(menu_mark ENABLE_PERFORMANCE)"           "Performance tuning"                       "--performance"
     menu_row  2 "$(menu_mark ENABLE_SECURE_BOOT)"           "Secure Boot / MOK automation"             "--secure-boot"
@@ -1875,6 +1896,7 @@ menu_render() {
     menu_row 15 "$(menu_mark REMOVE_MOK_KEYS)"              "Remove MOK keys on uninstall"             "--remove-mok"
     printf '  %2d) [>] %-40s %s\n' 16 "Regulatory domain: $REG_DOMAIN" "(press 16 to change)"
     printf '  %2d) [>] %-40s %s\n' 17 "Driver strategy: ${FORCE_METHOD:-auto}" "(press 17 to change)"
+    printf '  %2d) [>] %-40s %s\n' 18 "Uninstall MycoWave (remove driver + config)" "(press 18, then confirm)"
     printf '\n'
 }
 
@@ -1941,6 +1963,12 @@ install_menu() {
             15) menu_toggle_flag REMOVE_MOK_KEYS ;;
             16) menu_choose_domain ;;
             17) menu_choose_strategy ;;
+            18|u|U)
+                menu_uninstall
+                if [[ "$UNINSTALL" == true ]]; then
+                    return 0
+                fi
+                ;;
              *) menu_warn "Unknown key '$__key' - use a row number, or p/d/a/y/q/h." ;;
         esac
     done
