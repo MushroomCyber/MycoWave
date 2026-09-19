@@ -198,7 +198,7 @@ What it does and does not do:
 
 - **Packages**: purges only the DKMS packages MycoWave recorded as installed. If none were recorded, `realtek-rtl88xxau-dkms` / `realtek-rtl8814au-dkms` are left untouched (remove them manually if you want).
 - **`/etc/default/crda`**: never deleted while `dpkg` owns it (package-owned); removed only if MycoWave itself created it.
-- **Firmware**: package-owned blobs under `/lib/firmware/rtlwifi/` are kept unless MycoWave copied them.
+- **Firmware**: package-owned blobs under `/lib/firmware/rtlwifi/` and `/lib/firmware/rtw88/` are kept unless MycoWave copied them.
 - **MOK keys**: kept at `/var/lib/shim-signed/mok` by default. Add `--remove-mok` to delete the key pair — note the UEFI enrollment still remains in firmware, and you must regenerate and re-enroll a MOK (then reboot) before Secure Boot will load a signed DKMS module again.
 - **Logs**: the install log at `/var/log/mycowave-install.log` is left in place; crash dumps under `/var/log/mycowave-crashes/` are removed.
 
@@ -238,8 +238,8 @@ The full install log is at `/var/log/mycowave-install.log`.
 │   └── awus036ach-monitor.service    # (only with --monitor-service)
 ├── /etc/initramfs-tools/scripts/init-top/
 │   └── awus036ach                    # Early driver load
-├── /lib/firmware/rtlwifi/
-│   └── rtw88xx_fw.bin                # Latest firmware
+├── /lib/firmware/rtw88/
+│   └── rtw8812a_fw.bin, rtw8821a_fw.bin  # Latest rtw88 firmware
 ├── /var/lib/mycowave/
 │   └── installed.files               # Uninstall manifest
 └── /var/log/mycowave-install.log     # Install log

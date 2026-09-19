@@ -58,9 +58,12 @@ usbcore.autosuspend=-1
 
 **Per-Device** (`/etc/udev/rules.d/99-mycowave-usb-pm.rules`):
 ```udev
-ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="0bda", ATTR{idProduct}=="a811", \
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="0bda", ATTR{idProduct}=="a811|8812|881a", \
     RUN+="/bin/sh -c 'echo -1 > /sys$DEVPATH/power/autosuspend_delay_ms; echo on > /sys$DEVPATH/power/control'"
 ```
+
+The script also installs a second rule that matches the adapter's wireless interface class
+(`ATTR{bInterfaceClass}=="ff"`) with the same action.
 
 **Why**: Prevents the adapter from entering USB suspend during idle periods (e.g., between channel hops in monitor mode).
 
@@ -87,14 +90,14 @@ apt install kalipi-kernel-headers
 
 ```ini
 # Force USB 2.0 mode
-options 8812au rtw_switch_usb_mode=0
+options 88XXau rtw_switch_usb_mode=0
 options rtw88_8812au rtw_switch_usb_mode=0
 
 # Disable deep power save
-options 8812au rtw_disable_lps_deep=1
+options 88XXau rtw_disable_lps_deep=1
 
 # Enable thermal tracking
-options 8812au rtw_tx_pwr_track=1 rtw_thermal_protect=1
+options 88XXau rtw_tx_pwr_track=1 rtw_thermal_protect=1
 ```
 
 | Parameter | Value | Purpose |
@@ -124,8 +127,8 @@ for dev in /sys/bus/usb/devices/*/power/control; do
 done
 
 # Check module parameters
-cat /sys/module/8812au/parameters/rtw_switch_usb_mode
-cat /sys/module/8812au/parameters/rtw_disable_lps_deep
+cat /sys/module/88XXau/parameters/rtw_switch_usb_mode
+cat /sys/module/88XXau/parameters/rtw_disable_lps_deep
 
 # Verify kalipi headers
 dpkg -l kalipi-kernel-headers
@@ -170,13 +173,13 @@ sudo apt update && sudo apt install -y kalipi-kernel-headers
 
 # 5. Create modprobe config
 sudo tee /etc/modprobe.d/mycowave-pi.conf <<'EOF'
-options 8812au rtw_switch_usb_mode=0 rtw_disable_lps_deep=1 rtw_tx_pwr_track=1 rtw_thermal_protect=1
+options 88XXau rtw_switch_usb_mode=0 rtw_disable_lps_deep=1 rtw_tx_pwr_track=1 rtw_thermal_protect=1
 options rtw88_8812au rtw_switch_usb_mode=0
 EOF
 
 # 6. Create udev rule
 sudo tee /etc/udev/rules.d/99-mycowave-usb-pm.rules <<'EOF'
-ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="0bda", ATTR{idProduct}=="a811", \
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="0bda", ATTR{idProduct}=="a811|8812|881a", \
     RUN+="/bin/sh -c 'echo -1 > /sys$DEVPATH/power/autosuspend_delay_ms; echo on > /sys$DEVPATH/power/control'"
 EOF
 

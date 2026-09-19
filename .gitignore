@@ -1,4 +1,2 @@
-# Agent guidance file.
-# Kept locally so coding agents pick up repo-specific instructions, but
-# intentionally not published in the repository.
+# Local-only files (not part of the published project).
 /AGENTS.md

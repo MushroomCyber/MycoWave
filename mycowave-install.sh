@@ -2,8 +2,8 @@
 # =============================================================================
 # MycoWave - Alpha AWUS036ACH Driver Installer for Kali Linux
 # Smart, version-aware installer supporting Kali 2024.x - 2026.1+
-# Supports: x86_64, ARM64 (Raspberry Pi), Secure Boot, Kernel 6.6 - 6.18+
-# Project: https://github.com/your-org/MycoWave
+# Supports: x86_64, ARM64 (Raspberry Pi), Secure Boot, Kernel 6.6 - 7.x
+# Project: https://github.com/MushroomCyber/MycoWave
 # =============================================================================
 
 set -euo pipefail
@@ -1999,94 +1999,6 @@ maybe_run_menu() {
 }
 
 # ─── Main ───────────────────────────────────────────────────────────────────
-print_banner() {
-    # Pure output only (no side effects). The banner follows the logo palette:
-    # red wordmark, green frame and bullets, bold-white title. When colour is
-    # unsafe (NO_COLOR, non-TTY, dumb/empty TERM) every accent is an empty
-    # string, so the plain output is byte-identical and carries no escapes.
-    local use_color=false
-    if [[ -z "${NO_COLOR:-}" && -t 1 && -n "${TERM:-}" && "${TERM:-}" != "dumb" ]]; then
-        use_color=true
-    fi
-
-    # Accents are locals: the global colour vars stay untouched and nothing
-    # leaks into the plain path. Bold white is banner-only, hence a local.
-    local c_red='' c_green='' c_white='' c_reset=''
-    if [[ "$use_color" == true ]]; then
-        printf -v c_red '%b' "$RED"
-        printf -v c_green '%b' "$GREEN"
-        c_white=$'\033[1;37m'
-        printf -v c_reset '%b' "$NC"
-    fi
-
-    local inner=71          # usable columns between the box borders (73 total)
-    local mark_cols=40      # display width of the wordmark block
-    local title="MycoWave v${SCRIPT_VERSION}"
-    local subtitle="Alpha AWUS036ACH Driver Installer for Kali Linux"
-
-    # Frame rule is built from spaces so the width is stated once.
-    local rule
-    printf -v rule '%*s' "$inner" ''
-    rule=${rule// /═}
-
-    # Center the wordmark over the box by indenting every row equally.
-    local mark_pad
-    printf -v mark_pad '%*s' "$(( (inner + 2 - mark_cols) / 2 ))" ''
-
-    printf '%s' "$c_red"
-    printf '%s\n' "$(cat <<'LOGO'
- __  __           __      __
-|  \/  |_  _ __ __\ \    / /_ ___ _____
-| |\/| | || / _/ _ \ \/\/ / _` \ V / -_)
-|_|  |_|\_, \__\___/\_/\_/\__,_|\_/\___|
-        |__/
-LOGO
-)" | sed "s/^/${mark_pad}/"
-    printf '%s' "$c_reset"
-
-    printf '\n'
-    printf '%s╔%s╗%s\n' "$c_green" "$rule" "$c_reset"
-
-    # Title line: green bars, bold-white text. Every colour sits in its own
-    # conversion and the %*s fields hold padding only, so widths never shift.
-    local tlen=${#title}
-    local tpad=$(( inner - tlen ))
-    if (( tpad < 0 )); then tpad=0; fi
-    local tleft=$(( tpad / 2 ))
-    local tright=$(( tpad - tleft ))
-    printf '%s║%s' "$c_green" "$c_reset"
-    printf '%*s%s%s%s%*s' "$tleft" '' "$c_white" "$title" "$c_reset" "$tright" ''
-    printf '%s║%s\n' "$c_green" "$c_reset"
-
-    # Subtitle line, centered and uncoloured.
-    local slen=${#subtitle}
-    local spad=$(( inner - slen ))
-    if (( spad < 0 )); then spad=0; fi
-    local sleft=$(( spad / 2 ))
-    local sright=$(( spad - sleft ))
-    printf '%s║%s%*s%s%*s%s║%s\n' "$c_green" "$c_reset" "$sleft" '' "$subtitle" "$sright" '' "$c_green" "$c_reset"
-
-    printf '%s╠%s╣%s\n' "$c_green" "$rule" "$c_reset"
-    printf '%s║%s  %-*s%s║%s\n' "$c_green" "$c_reset" "$(( inner - 2 ))" 'Smart installer supporting:' "$c_green" "$c_reset"
-
-    local -a features=(
-        'Kali 2024.x - 2026.1+ (Kernel 6.6 - 7.x; 6.19+ unmaintained)'
-        'Strategies: lwfinger rtw88, ac3rn, kali-dkms, aircrack-ng'
-        'x86_64, ARM64 (Raspberry Pi)'
-        'Secure Boot (MOK enrollment)'
-        'Monitor: manual helper (default) | --monitor-service (opt-in)'
-        'Menu: --menu/-m (auto-menu when run with no args)'
-        'Auto monitor mode, injection test, 5GHz channels'
-        'Performance optimizations (--performance)'
-    )
-    local feature
-    for feature in "${features[@]}"; do
-        printf '%s║%s  %s•%s %-*s%s║%s\n' "$c_green" "$c_reset" "$c_green" "$c_reset" "$(( inner - 4 ))" "$feature" "$c_green" "$c_reset"
-    done
-
-    printf '%s╚%s╝%s\n' "$c_green" "$rule" "$c_reset"
-}
-
 usage() {
     cat <<EOF
 Usage: sudo $0 [OPTIONS]
@@ -2182,8 +2094,6 @@ main() {
     run "mkdir -p /var/log"
     run "touch '$LOG_FILE'"
     run "chmod 644 '$LOG_FILE'"
-
-    print_banner
 
     detect_os
     detect_kernel

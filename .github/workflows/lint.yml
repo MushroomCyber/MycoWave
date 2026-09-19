@@ -37,9 +37,6 @@ jobs:
           done
 
       - name: ShellCheck
-        # TODO: raise this to --severity=warning once the existing warnings have
-        # been cleaned up. Starting at "error" keeps the first CI run from going
-        # red on pre-existing style warnings.
         run: |
           set -euo pipefail
           mapfile -t files < <(
