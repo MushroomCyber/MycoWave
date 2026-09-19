@@ -1,14 +1,14 @@
-<p align="center">
-  <img src="media/mycowave-logo.png" alt="MycoWave logo" width="240">
-</p>
+<div align="center">
+
+<img src="media/mycowave-logo.png" alt="MycoWave logo" width="160">
 
 # MycoWave
 
-> **Smart installer for the Alpha AWUS036ACH Wi-Fi adapter on Kali Linux**
+**Smart installer for the Alpha AWUS036ACH Wi-Fi adapter on Kali Linux**
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Shell: Bash](https://img.shields.io/badge/Shell-Bash-green.svg)](mycowave-install.sh)
-[![Kali: 2024.x-2026.1+](https://img.shields.io/badge/Kali-2024.x%20-%202026.1+-blue.svg)](https://www.kali.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![Shell: Bash](https://img.shields.io/badge/Shell-Bash-green.svg)](mycowave-install.sh) [![Kali: 2024.x – 2026.1+](https://img.shields.io/badge/Kali-2024.x%20--%202026.1%2B-blue.svg)](https://www.kali.org/)
+
+</div>
 
 ---
 
