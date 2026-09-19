@@ -21,6 +21,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DRY_RUN=false
 VERBOSE=false
 UNINSTALL=false
+SHOW_MENU=false
+NO_MENU=false
 FORCE_METHOD=""
 SKIP_VERIFY=false
 SKIP_MONITOR_SETUP=false
@@ -1674,6 +1676,300 @@ uninstall_driver() {
     success "Uninstall complete. Reboot recommended."
 }
 
+# ─── Interactive Options Menu ───────────────────────────────────────────────
+# Additive: only used with --menu/-m, or auto-shown when the script is run with
+# no arguments on a TTY. Never runs for --uninstall/--help/--remove-mok, and
+# never in a non-TTY context. Menu output is guarded so it can run before
+# require_root() without a failed log-file tee aborting under `set -e`.
+
+menu_info() { info "$*" || true; }
+menu_warn() { warn "$*" || true; }
+
+menu_read() {
+    local __target="$1"
+    local __line=""
+    if [[ -r /dev/tty ]]; then
+        IFS= read -r __line < /dev/tty || return 1
+    else
+        IFS= read -r __line || return 1
+    fi
+    printf -v "$__target" '%s' "$__line"
+    return 0
+}
+
+menu_trim() {
+    local __t="${!1}"
+    __t="${__t//$'\r'/}"
+    __t="${__t#"${__t%%[![:space:]]*}"}"
+    __t="${__t%"${__t##*[![:space:]]}"}"
+    printf -v "$1" '%s' "$__t"
+}
+
+menu_yn() {
+    local __v="${!1}"
+    if [[ "$__v" == true ]]; then printf 'on'; else printf 'off'; fi
+}
+
+menu_yn_inverse() {
+    local __v="${!1}"
+    if [[ "$__v" == true ]]; then printf 'off'; else printf 'on'; fi
+}
+
+menu_mark() {
+    local __v="${!1}"
+    if [[ "$__v" == true ]]; then printf 'x'; else printf ' '; fi
+}
+
+menu_mark_inverse() {
+    local __v="${!1}"
+    if [[ "$__v" == true ]]; then printf ' '; else printf 'x'; fi
+}
+
+menu_row() {
+    local __num="$1" __mark="$2" __label="$3" __flag="$4"
+    printf '  %2d) [%s] %-40s %s\n' "$__num" "$__mark" "$__label" "$__flag"
+}
+
+menu_toggle_flag() {
+    local __name="$1"
+    local __cur="${!__name}"
+    if [[ "$__cur" == true ]]; then
+        printf -v "$__name" '%s' "false"
+    else
+        printf -v "$__name" '%s' "true"
+    fi
+}
+
+menu_reset_defaults() {
+    DRY_RUN=false
+    VERBOSE=false
+    FORCE_METHOD=""
+    SKIP_VERIFY=false
+    SKIP_MONITOR_SETUP=false
+    ENABLE_MONITOR_SERVICE=false
+    REG_DOMAIN="BO"
+    ENABLE_PERFORMANCE=false
+    SKIP_FIRMWARE_UPDATE=false
+    ENABLE_SECURE_BOOT=false
+    ENABLE_PI_OPTIMIZATIONS=false
+    ENABLE_WATCHDOG=false
+    ENABLE_THERMAL=false
+    ENABLE_COEX=false
+    SKIP_CRASH_COLLECTOR=false
+    RUN_TEST_SUITE=false
+    REMOVE_MOK_KEYS=false
+}
+
+menu_clear_optional() {
+    ENABLE_PERFORMANCE=false
+    ENABLE_SECURE_BOOT=false
+    ENABLE_PI_OPTIMIZATIONS=false
+    ENABLE_WATCHDOG=false
+    ENABLE_THERMAL=false
+    ENABLE_COEX=false
+    ENABLE_MONITOR_SERVICE=false
+    SKIP_MONITOR_SETUP=false
+    SKIP_FIRMWARE_UPDATE=false
+    SKIP_VERIFY=false
+    RUN_TEST_SUITE=false
+    REMOVE_MOK_KEYS=false
+    SKIP_CRASH_COLLECTOR=false
+}
+
+menu_preset_performance() {
+    ENABLE_PERFORMANCE=true
+    ENABLE_WATCHDOG=true
+    ENABLE_THERMAL=true
+    menu_info "Performance preset applied: --performance --watchdog --thermal"
+}
+
+menu_choose_domain() {
+    local __code=""
+    while true; do
+        printf 'Regulatory domain - 2-letter country code [current: %s] (empty keeps current, q cancels): ' "$REG_DOMAIN"
+        if ! menu_read __code; then
+            printf '\n'
+            return 0
+        fi
+        menu_trim __code
+        __code="${__code^^}"
+        if [[ -z "$__code" || "$__code" == "Q" ]]; then
+            return 0
+        fi
+        if [[ "$__code" =~ ^[A-Z]{2}$ ]]; then
+            REG_DOMAIN="$__code"
+            menu_info "Regulatory domain set to $REG_DOMAIN"
+            return 0
+        fi
+        menu_warn "Invalid code '$__code' (expected two letters, e.g. US, BO)."
+    done
+}
+
+menu_choose_strategy() {
+    printf '\n'
+    printf 'Driver strategy:\n'
+    printf '  0) auto        (let detection decide)\n'
+    printf '  1) inkernel    (in-kernel rtw88, managed)\n'
+    printf '  2) lwfinger    (rtw88 backport, managed)\n'
+    printf '  3) kali-dkms   (Kali package, kernels 6.6-6.13)\n'
+    printf '  4) ac3rn       (patched source, kernels 6.15-6.18)\n'
+    printf '  5) aircrack-ng (source build, injection)\n'
+    printf 'Select [0-5] (empty cancels): '
+    local __sel=""
+    if ! menu_read __sel; then
+        printf '\n'
+        return 0
+    fi
+    menu_trim __sel
+    case "$__sel" in
+        ""|0) FORCE_METHOD="" ;;
+        1) FORCE_METHOD="inkernel" ;;
+        2) FORCE_METHOD="lwfinger" ;;
+        3) FORCE_METHOD="kali-dkms" ;;
+        4) FORCE_METHOD="ac3rn" ;;
+        5) FORCE_METHOD="aircrack-ng" ;;
+        *) menu_warn "Invalid selection '$__sel'; keeping ${FORCE_METHOD:-auto}." ;;
+    esac
+}
+
+menu_help() {
+    printf '\n'
+    printf '%b\n' "${CYAN}Menu help${NC}"
+    printf '  Enter a row number and press Enter to toggle it or change its value.\n'
+    printf '  p  performance preset (performance + watchdog + thermal)\n'
+    printf '  d  restore compiled-in defaults\n'
+    printf '  a  clear all optional toggles\n'
+    printf '  y  confirm and continue (Enter alone also confirms)\n'
+    printf '  q  abort without changing anything\n'
+    printf '  h  show this help\n'
+    printf '\n'
+    printf '  Enabling the full test suite forces skip-verify, matching --test.\n'
+    printf '  Crash collector (row 7) is ON by default; toggling it sets --skip-crash-collector.\n'
+    printf '\nPress Enter to return to the menu...'
+    local __dummy=""
+    menu_read __dummy || true
+}
+
+menu_render() {
+    if [[ -t 1 ]]; then printf '\033[2J\033[H'; fi
+    printf '%b\n' "${BLUE}════════════════════════════════════════════════════════════════════${NC}"
+    printf '%b\n' "  ${CYAN}MycoWave installer - interactive options${NC} ${YELLOW}(v$SCRIPT_VERSION)${NC}"
+    printf '%b\n' "${BLUE}════════════════════════════════════════════════════════════════════${NC}"
+    printf '%b\n' "  ${YELLOW}Keys:${NC} [number]=toggle/choose   [p]=performance preset   [d]=defaults"
+    printf '%b\n' "        [a]=clear all   [y/Enter]=confirm   [q]=abort   [h]=help"
+    printf '\n'
+    menu_row  1 "$(menu_mark ENABLE_PERFORMANCE)"           "Performance tuning"                       "--performance"
+    menu_row  2 "$(menu_mark ENABLE_SECURE_BOOT)"           "Secure Boot / MOK automation"             "--secure-boot"
+    menu_row  3 "$(menu_mark ENABLE_PI_OPTIMIZATIONS)"      "Raspberry Pi / ARM64 optimizations"       "--pi-optimizations"
+    menu_row  4 "$(menu_mark ENABLE_WATCHDOG)"              "Self-healing watchdog"                    "--watchdog"
+    menu_row  5 "$(menu_mark ENABLE_THERMAL)"               "Thermal monitoring"                       "--thermal"
+    menu_row  6 "$(menu_mark ENABLE_COEX)"                  "Bluetooth coexistence"                    "--coex"
+    menu_row  7 "$(menu_mark_inverse SKIP_CRASH_COLLECTOR)" "Crash dump collector (default ON)"        ""
+    menu_row  8 "$(menu_mark ENABLE_MONITOR_SERVICE)"       "Monitor service (kills NetworkManager)"   "--monitor-service"
+    menu_row  9 "$(menu_mark SKIP_MONITOR_SETUP)"           "Skip monitor automation"                  "--skip-monitor"
+    menu_row 10 "$(menu_mark SKIP_FIRMWARE_UPDATE)"         "Skip firmware update check"               "--skip-firmware"
+    menu_row 11 "$(menu_mark SKIP_VERIFY)"                  "Skip post-install verification"           "--skip-verify"
+    menu_row 12 "$(menu_mark RUN_TEST_SUITE)"               "Run full test suite (implies skip-verify)" "--test"
+    menu_row 13 "$(menu_mark DRY_RUN)"                      "Dry run (no changes)"                     "--dry-run"
+    menu_row 14 "$(menu_mark VERBOSE)"                      "Verbose output"                           "--verbose"
+    menu_row 15 "$(menu_mark REMOVE_MOK_KEYS)"              "Remove MOK keys on uninstall"             "--remove-mok"
+    printf '  %2d) [>] %-40s %s\n' 16 "Regulatory domain: $REG_DOMAIN" "(press 16 to change)"
+    printf '  %2d) [>] %-40s %s\n' 17 "Driver strategy: ${FORCE_METHOD:-auto}" "(press 17 to change)"
+    printf '\n'
+}
+
+menu_summary() {
+    printf '\n'
+    menu_info "Install options selected:"
+    menu_info "  Driver strategy  : ${FORCE_METHOD:-auto (detected)}"
+    menu_info "  Regulatory domain: $REG_DOMAIN"
+    menu_info "  Performance      : $(menu_yn ENABLE_PERFORMANCE)"
+    menu_info "  Secure Boot/MOK  : $(menu_yn ENABLE_SECURE_BOOT)"
+    menu_info "  Pi optimizations : $(menu_yn ENABLE_PI_OPTIMIZATIONS)"
+    menu_info "  Watchdog         : $(menu_yn ENABLE_WATCHDOG)"
+    menu_info "  Thermal monitor  : $(menu_yn ENABLE_THERMAL)"
+    menu_info "  Bluetooth coex   : $(menu_yn ENABLE_COEX)"
+    menu_info "  Crash collector  : $(menu_yn_inverse SKIP_CRASH_COLLECTOR)"
+    menu_info "  Monitor service  : $(menu_yn ENABLE_MONITOR_SERVICE)"
+    menu_info "  Skip monitor     : $(menu_yn SKIP_MONITOR_SETUP)"
+    menu_info "  Skip firmware    : $(menu_yn SKIP_FIRMWARE_UPDATE)"
+    menu_info "  Skip verify      : $(menu_yn SKIP_VERIFY)"
+    menu_info "  Full test suite  : $(menu_yn RUN_TEST_SUITE)"
+    menu_info "  Dry run          : $(menu_yn DRY_RUN)"
+    menu_info "  Verbose          : $(menu_yn VERBOSE)"
+    menu_info "  Remove MOK keys  : $(menu_yn REMOVE_MOK_KEYS)"
+    printf '\n'
+}
+
+install_menu() {
+    local __key=""
+    while true; do
+        menu_render
+        __key=""
+        if ! menu_read __key; then
+            printf '\n'
+            menu_info "Input closed (EOF) - aborting; nothing was changed."
+            exit 0
+        fi
+        menu_trim __key
+        case "$__key" in
+            ""|y|Y) menu_summary; return 0 ;;
+            q|Q)
+                printf '\n'
+                menu_info "Aborted - nothing was changed."
+                exit 0
+                ;;
+            h|H|\?) menu_help ;;
+            p|P) menu_preset_performance ;;
+            d|D) menu_reset_defaults; menu_info "Restored compiled-in defaults." ;;
+            a|A) menu_clear_optional; menu_info "Cleared all optional toggles." ;;
+             1) menu_toggle_flag ENABLE_PERFORMANCE ;;
+             2) menu_toggle_flag ENABLE_SECURE_BOOT ;;
+             3) menu_toggle_flag ENABLE_PI_OPTIMIZATIONS ;;
+             4) menu_toggle_flag ENABLE_WATCHDOG ;;
+             5) menu_toggle_flag ENABLE_THERMAL ;;
+             6) menu_toggle_flag ENABLE_COEX ;;
+             7) menu_toggle_flag SKIP_CRASH_COLLECTOR ;;
+             8) menu_toggle_flag ENABLE_MONITOR_SERVICE ;;
+             9) menu_toggle_flag SKIP_MONITOR_SETUP ;;
+            10) menu_toggle_flag SKIP_FIRMWARE_UPDATE ;;
+            11) menu_toggle_flag SKIP_VERIFY ;;
+            12) menu_toggle_flag RUN_TEST_SUITE
+                if [[ "$RUN_TEST_SUITE" == true ]]; then SKIP_VERIFY=true; fi ;;
+            13) menu_toggle_flag DRY_RUN ;;
+            14) menu_toggle_flag VERBOSE ;;
+            15) menu_toggle_flag REMOVE_MOK_KEYS ;;
+            16) menu_choose_domain ;;
+            17) menu_choose_strategy ;;
+             *) menu_warn "Unknown key '$__key' - use a row number, or p/d/a/y/q/h." ;;
+        esac
+    done
+}
+
+# Decide whether to show the interactive menu, and run it if appropriate.
+maybe_run_menu() {
+    # Never for uninstall/MOK-removal; --help exits inside parse_args.
+    if [[ "$UNINSTALL" == true || "$REMOVE_MOK_KEYS" == true ]]; then
+        return 0
+    fi
+
+    local __wanted=false
+    if [[ "$SHOW_MENU" == true ]]; then
+        __wanted=true
+    elif [[ "$NO_MENU" != true && "$ORIGINAL_ARGC" -eq 0 ]]; then
+        __wanted=true
+    fi
+    [[ "$__wanted" == true ]] || return 0
+
+    if [[ ! -t 0 || ! -t 1 ]]; then
+        menu_warn "Interactive menu needs a terminal; continuing with defaults/existing flags."
+        return 0
+    fi
+
+    install_menu
+    return 0
+}
+
 # ─── Main ───────────────────────────────────────────────────────────────────
 print_banner() {
     cat <<'EOF'
@@ -1687,6 +1983,7 @@ print_banner() {
 ║  • x86_64, ARM64 (Raspberry Pi)                                    ║
 ║  • Secure Boot (MOK enrollment)                                     ║
 ║  • Monitor: manual helper (default) | --monitor-service (opt-in)    ║
+║  • Menu: --menu/-m (auto-menu when run with no args)                ║
 ║  • Auto monitor mode, injection test, 5GHz channels                ║
 ║  • Performance optimizations (--performance)                       ║
 ╚═══════════════════════════════════════════════════════════════════════╝
@@ -1697,7 +1994,11 @@ usage() {
     cat <<EOF
 Usage: sudo $0 [OPTIONS]
 
+Running with no options on a terminal opens the interactive install-options menu.
+
 Options:
+  --menu, -m             Show the interactive install-options menu
+  --no-menu              Skip the auto-menu (use compiled-in defaults)
   --dry-run              Show what would be done without making changes
   --verbose, -v          Verbose output
   --uninstall            Remove driver and all configuration
@@ -1738,6 +2039,8 @@ EOF
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            --menu|-m) SHOW_MENU=true ;;
+            --no-menu) NO_MENU=true ;;
             --dry-run) DRY_RUN=true ;;
             --verbose|-v) VERBOSE=true ;;
             --uninstall) UNINSTALL=true ;;
@@ -1764,7 +2067,13 @@ parse_args() {
 }
 
 main() {
+    # Capture the original argument count BEFORE parse_args consumes it: the
+    # interactive menu auto-opens only when the script was invoked with no args.
+    ORIGINAL_ARGC=$#
     parse_args "$@"
+
+    # Interactive menu (opt-in via --menu/-m, or automatic on a bare TTY run).
+    maybe_run_menu
 
     # Root check FIRST: a non-root user must get the friendly error, not a
     # cryptic set -e failure from the log-file mkdir/touch below.

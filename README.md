@@ -63,6 +63,20 @@ sudo ./mycowave-install.sh --force-method lwfinger
 
 After install, just **plug in the AWUS036ACH** and run `sudo mycowave-monitor-mode` for a ready-to-use monitor interface (modern `airmon-ng` may keep the original name — confirm with `iw dev`). Boot-time monitor automation is opt-in via `--monitor-service`.
 
+### Interactive setup menu
+
+Running `sudo ./mycowave-install.sh` with **no arguments on a real terminal** opens an interactive menu. It offers
+toggles for performance tuning, Secure Boot/MOK signing, Raspberry Pi optimizations, Wi-Fi watchdog, thermal
+monitoring, Bluetooth coexistence, the crash collector (default ON), the boot-time monitor service (default OFF —
+it kills NetworkManager), skip monitor automation, skip firmware, skip verification, the full test suite, dry-run
+and verbose, plus value choosers for the regulatory domain (2-letter code, default `BO`) and the driver strategy
+(auto/`inkernel`/`lwfinger`/`kali-dkms`/`ac3rn`/`aircrack-ng`). Keys: number to toggle, `p` performance preset,
+`d` defaults, `a` clear optional, `y`/Enter confirm, `q` abort, `h` help.
+
+The menu appears **only** for a bare run on a terminal. Any flagged run, `--uninstall`, `--help`, piped/CI runs and
+non-TTY runs behave exactly as before. `--menu` (`-m`) forces it; `--no-menu` disables it. Enabling the full test
+suite still implies `--skip-verify`, and `--dry-run --menu` is allowed and stays side-effect free.
+
 ---
 
 ## Installation Methods by Kernel
@@ -116,6 +130,8 @@ sudo ./mycowave-install.sh [OPTIONS]
 Options:
   --dry-run              Show what would be done without making changes
   --verbose, -v          Verbose output
+  --menu, -m             Force the interactive setup menu
+  --no-menu              Never show the interactive setup menu
   --uninstall            Remove driver and all configuration (manifest-driven)
   --force-method METHOD  Force install method: inkernel|lwfinger|kali-dkms|ac3rn|aircrack-ng
                          (kali-dkms is refused on kernels > 6.13)

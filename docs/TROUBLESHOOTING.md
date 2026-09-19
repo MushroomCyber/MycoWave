@@ -320,6 +320,10 @@ mokutil --list-enrolled
 
 ## Recovery Commands
 
+The interactive setup menu only appears when the installer is run with no arguments on a real terminal (it needs a
+TTY, so piped/CI or non-TTY runs never prompt). Pass any flags or add `--no-menu` for scripted, non-interactive
+installs; `--dry-run --menu` stays side-effect free.
+
 ```bash
 # Complete reset
 sudo ./mycowave-install.sh --uninstall
